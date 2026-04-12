@@ -4,7 +4,7 @@ import { useChat } from "@ai-sdk/react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useVercelUseChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { chatAttachmentAdapter } from "@/lib/chat-attachment-adapter";
-import { BotIcon, ChevronDownIcon, Loader } from "lucide-react";
+import { ChevronDownIcon, Loader } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Thread } from "./assistant-ui/thread";
 import { ToolDescriptionsProvider } from "@/lib/tool-descriptions-context";
@@ -48,6 +48,11 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
   
   const chat = useChat({
     api: `${API_URL}/api/chat`,
+    // 通过 body 透传 sessionId 给后端，后端用它作为浏览器 session_id，
+    // 使 BrowserPanel 轮询与 Agent 工具执行的 session_id 保持一致。
+    // 注意：不用 useChat 的 id 选项，避免 sessionId 变化时 SDK 重置 store
+    // 导致 ThreadPrimitive.MessageByIndex 访问越界崩溃。
+    body: { sessionId },
     // 后端每次请求只做一步（单次 LLM 调用），多轮 Agent 循环由 useChat 驱动：
     // 每步以 finishReason="tool-calls" 结束后，SDK 自动发起下一步请求，
     // 实现类 Manus 的分步流式展示（每个工具调用结果立即呈现）。
@@ -83,7 +88,15 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
     }
     const prev = prevSessionIdRef.current;
     if (prev === undefined) {
-      setSessionSwitchLoading(messagesLenRef.current === 0);
+      // 检查是否有待发送的初始消息（从主页跳转），如果有则不显示 loading
+      const initialSession = sessionStorage.getItem("sevn:initial-session");
+      const hasPendingContent =
+        !!sessionStorage.getItem("sevn:initial-message") ||
+        !!sessionStorage.getItem("sevn:initial-attachments");
+      const hasInitialMessage =
+        hasPendingContent &&
+        (!initialSession || initialSession === sessionId);
+      setSessionSwitchLoading(messagesLenRef.current === 0 && !hasInitialMessage);
       return;
     }
     if (prev !== sessionId) {
@@ -111,6 +124,23 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
       chat.setMessages([]);
 
       if (sessionId) {
+        // 主页跳转：会话在服务端仍为空，若此处拉取晚于 append 完成，setMessages([]) 会覆盖用户首条消息
+        const pendingForSession =
+          typeof window !== "undefined"
+            ? sessionStorage.getItem("sevn:initial-session")
+            : null;
+        const hasInitialPending =
+          typeof window !== "undefined" &&
+          (!!sessionStorage.getItem("sevn:initial-message") ||
+            !!sessionStorage.getItem("sevn:initial-attachments")) &&
+          pendingForSession === sessionId;
+
+        if (hasInitialPending) {
+          activeSessionLoadRef.current = null;
+          setSessionSwitchLoading(false);
+          return;
+        }
+
         const loadId = sessionId;
         const startedAt = performance.now();
         activeSessionLoadRef.current = loadId;
@@ -225,6 +255,7 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
     initialMsgSentRef.current = true;
     sessionStorage.removeItem("sevn:initial-message");
     sessionStorage.removeItem("sevn:initial-attachments");
+    sessionStorage.removeItem("sevn:initial-session");
 
     let experimental_attachments: Array<{ name: string; contentType: string; url: string }> | undefined;
     if (pendingAttachmentsRaw) {
@@ -268,18 +299,15 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
       <AssistantRuntimeProvider runtime={runtime}>
       <div className="flex h-full flex-col">
         {/* 顶部标题栏 */}
-        <header className="flex items-center gap-2.5 border-b border-gray-200 dark:border-gray-700 px-5 h-[52px] flex-shrink-0 bg-white dark:bg-gray-900">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-black dark:bg-white shadow-sm">
-            <BotIcon className="h-4 w-4 text-white dark:text-black" />
-          </div>
-          
+        <header className="flex items-center gap-2.5 px-5 h-[52px] flex-shrink-0 bg-white dark:bg-gray-900">
+
           {/* 模型选择下拉菜单 */}
           <div className="relative">
             <button
               onClick={() => setShowModelMenu(!showModelMenu)}
               className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             >
-              <span className="text-sm font-semibold text-gray-900 dark:text-gray-100 leading-none">
+              <span className="text-[15px] text-gray-900 dark:text-gray-100 leading-none">
                 {MODELS.find(m => m.id === selectedModel)?.label ?? selectedModel}
               </span>
               <ChevronDownIcon className="h-4 w-4 text-gray-400" />
@@ -312,11 +340,6 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
           
           {/* 运行状态指示 */}
           <div className="ml-auto flex items-center gap-3">
-            <div className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-xs text-gray-400">在线</span>
-            </div>
-            <div className="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-1" />
             <ThemeToggle />
           </div>
         </header>

@@ -31,51 +31,84 @@ logger = logging.getLogger(__name__)
 
 # ── 截图存储目录 ──────────────────────────────────────────────────────────────
 
-def _screenshots_dir() -> Path:
-    root = Path(__file__).resolve().parent.parent.parent.parent / "data" / "screenshots"
+def _screenshots_dir(session_id: str = "default") -> Path:
+    root = Path(__file__).resolve().parent.parent.parent.parent / "data" / "screenshots" / session_id
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 # ── 浏览器状态单例 ────────────────────────────────────────────────────────────
 
-class _BrowserState:
-    """跨工具调用共享的 Playwright 浏览器实例管理器"""
+class _BrowserSession:
+    """单个会话的浏览器状态（一个 BrowserContext + 一个 Page）"""
 
-    def __init__(self) -> None:
-        self._pw = None          # Playwright 根对象
-        self._browser = None     # Browser 实例
-        self._context = None     # BrowserContext
-        self._page = None        # Page（当前活跃页面）
-        self._lock = asyncio.Lock()
-
-        # 对外暴露给 /api/browser/state 接口
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self._context: Any = None
+        self._page: Any = None
         self.current_url: str = ""
         self.page_title: str = ""
         self.last_screenshot_url: str = ""
+        self._last_active: float = time.monotonic()
 
-    async def get_page(self):
-        """返回当前 Page，必要时惰性初始化 Playwright / Browser / Context。"""
+    @property
+    def last_active(self) -> float:
+        return self._last_active
+
+    def touch(self) -> None:
+        self._last_active = time.monotonic()
+
+
+class BrowserSessionManager:
+    """按 session_id 隔离的浏览器会话管理器
+
+    架构：
+      1 个 Browser 进程（共享）
+        ├── BrowserContext (session_abc) → Page
+        ├── BrowserContext (session_def) → Page
+        └── BrowserContext (session_xyz) → Page
+
+    每个会话拥有独立的 BrowserContext（Cookie、存储、缓存完全隔离），
+    互不干扰，且会话结束后可单独释放资源。
+    """
+
+    SESSION_IDLE_TIMEOUT = 1800  # 30 分钟无操作自动清理
+
+    def __init__(self) -> None:
+        self._pw: Any = None
+        self._browser: Any = None
+        self._sessions: dict[str, _BrowserSession] = {}
+        self._lock = asyncio.Lock()
+
+    async def _ensure_browser(self) -> Any:
+        """确保 Browser 进程已启动"""
+        if self._pw is None:
+            from playwright.async_api import async_playwright
+            self._pw = await async_playwright().start()
+
+        if self._browser is None or not self._browser.is_connected():
+            self._browser = await self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+        return self._browser
+
+    async def get_page(self, session_id: str) -> Any:
+        """获取指定会话的 Page，必要时惰性创建 BrowserContext。"""
         async with self._lock:
-            if self._pw is None:
-                from playwright.async_api import async_playwright
-                self._pw = await async_playwright().start()
+            if session_id not in self._sessions:
+                self._sessions[session_id] = _BrowserSession(session_id)
 
-            if self._browser is None or not self._browser.is_connected():
-                self._browser = await self._pw.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-                self._context = None
-                self._page = None
+            session = self._sessions[session_id]
+            session.touch()
 
-            if self._context is None:
-                self._context = await self._browser.new_context(
+            browser = await self._ensure_browser()
+
+            if session._context is None:
+                session._context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -83,22 +116,34 @@ class _BrowserState:
                         "Chrome/120.0.0.0 Safari/537.36"
                     ),
                 )
-                self._page = None
+                session._page = None
 
-            if self._page is None or self._page.is_closed():
-                self._page = await self._context.new_page()
+            if session._page is None or session._page.is_closed():
+                session._page = await session._context.new_page()
 
-            return self._page
+            return session._page
+
+    def get_session(self, session_id: str) -> _BrowserSession | None:
+        return self._sessions.get(session_id)
+
+    def get_or_create_session(self, session_id: str) -> _BrowserSession:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = _BrowserSession(session_id)
+        return self._sessions[session_id]
 
     async def take_screenshot(
         self,
+        session_id: str,
         selector: str | None = None,
         full_page: bool = False,
     ) -> str:
-        """截图后保存到磁盘，返回 `/api/browser/screenshot/<filename>` 路径。"""
-        page = await self.get_page()
+        """截图后保存到磁盘，返回 URL 路径。"""
+        page = await self.get_page(session_id)
+        session = self._sessions[session_id]
+        session.touch()
+
         fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-        dest = _screenshots_dir() / fname
+        dest = _screenshots_dir(session_id) / fname
 
         try:
             if selector:
@@ -113,12 +158,40 @@ class _BrowserState:
             logger.warning("截图失败: %s", exc)
             return ""
 
-        url = f"/api/browser/screenshot/{fname}"
-        self.last_screenshot_url = url
+        url = f"/api/browser/screenshot/{session_id}/{fname}"
+        session.last_screenshot_url = url
         return url
 
+    async def close_session(self, session_id: str) -> None:
+        """关闭指定会话的 BrowserContext，释放资源。"""
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+        try:
+            if session._context:
+                await session._context.close()
+        except Exception:
+            pass
+        logger.info("会话 %s 的浏览器已关闭", session_id)
+
+    async def cleanup_idle_sessions(self) -> int:
+        """清理超时未活跃的会话，返回清理数量。"""
+        now = time.monotonic()
+        expired = [
+            sid
+            for sid, s in self._sessions.items()
+            if now - s.last_active > self.SESSION_IDLE_TIMEOUT
+        ]
+        for sid in expired:
+            await self.close_session(sid)
+        if expired:
+            logger.info("清理了 %d 个空闲浏览器会话", len(expired))
+        return len(expired)
+
     async def cleanup(self) -> None:
-        """关闭浏览器并释放资源（服务器关闭时调用）。"""
+        """关闭所有会话并释放 Browser 进程（服务器关闭时调用）。"""
+        for sid in list(self._sessions.keys()):
+            await self.close_session(sid)
         try:
             if self._browser:
                 await self._browser.close()
@@ -130,17 +203,23 @@ class _BrowserState:
         except Exception:
             pass
         self._browser = None
-        self._context = None
-        self._page = None
         self._pw = None
 
 
-# 全局单例
-_browser_state = _BrowserState()
+_manager: BrowserSessionManager | None = None
 
 
-def get_browser_state() -> _BrowserState:
-    return _browser_state
+def get_browser_manager() -> BrowserSessionManager:
+    if _manager is None:
+        raise RuntimeError("BrowserSessionManager 未初始化，请先调用 init_browser_manager()")
+    return _manager
+
+
+def init_browser_manager() -> BrowserSessionManager:
+    global _manager
+    if _manager is None:
+        _manager = BrowserSessionManager()
+    return _manager
 
 
 # ── 工具 1：browser_navigate ──────────────────────────────────────────────────
@@ -179,17 +258,19 @@ class BrowserNavigateTool(BaseTool):
         url: str,
         wait_for: str = "load",
         timeout: int = 30000,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
+        mgr = get_browser_manager()
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             await page.goto(url, wait_until=wait_for, timeout=timeout)
             title = await page.title()
             actual_url = page.url
-            bs.current_url = actual_url
-            bs.page_title = title
-            screenshot_url = await bs.take_screenshot()
+            session = mgr.get_or_create_session(session_id)
+            session.current_url = actual_url
+            session.page_title = title
+            screenshot_url = await mgr.take_screenshot(session_id)
             return json.dumps(
                 {
                     "success": True,
@@ -233,19 +314,21 @@ class BrowserScreenshotTool(BaseTool):
         self,
         full_page: bool = False,
         selector: str | None = None,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面，请先使用 browser_navigate")
-        screenshot_url = await bs.take_screenshot(selector=selector, full_page=full_page)
+        screenshot_url = await mgr.take_screenshot(session_id, selector=selector, full_page=full_page)
         if not screenshot_url:
             raise ToolExecutionError(self.name, "截图失败")
         return json.dumps(
             {
                 "success": True,
-                "url": bs.current_url,
-                "title": bs.page_title,
+                "url": session.current_url,
+                "title": session.page_title,
                 "screenshot_url": screenshot_url,
             },
             ensure_ascii=False,
@@ -287,13 +370,15 @@ class BrowserExtractTextTool(BaseTool):
         selector: str | None = None,
         include_title: bool = True,
         max_length: int = 5000,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             out: dict[str, Any] = {"url": page.url}
             if include_title:
                 out["title"] = await page.title()
@@ -317,7 +402,7 @@ class BrowserExtractTextTool(BaseTool):
                 else:
                     out["text"] = ""
 
-            out["screenshot_url"] = await bs.take_screenshot()
+            out["screenshot_url"] = await mgr.take_screenshot(session_id)
             return json.dumps(out, ensure_ascii=False)
         except Exception as exc:
             raise ToolExecutionError(self.name, f"提取文本失败: {exc}") from exc
@@ -359,14 +444,16 @@ class BrowserExtractAttrsTool(BaseTool):
         selector: str,
         attrs: list[str] | None = None,
         max_items: int = 100,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         target_attrs = attrs or ["href", "src"]
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             elements = await page.query_selector_all(selector)
             items: list[dict[str, str]] = []
             for el in elements[:max_items]:
@@ -437,13 +524,15 @@ class BrowserExtractTableTool(BaseTool):
         selector: str = "table",
         table_index: int = 0,
         output_format: str = "json",
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             tables = await page.query_selector_all(selector)
             if not tables:
                 return json.dumps(
@@ -538,13 +627,15 @@ class BrowserScrollTool(BaseTool):
         direction: str = "down",
         amount: int = 800,
         wait_ms: int = 1500,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             if direction == "bottom":
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             elif direction == "top":
@@ -559,7 +650,7 @@ class BrowserScrollTool(BaseTool):
 
             scroll_y = await page.evaluate("window.scrollY")
             page_height = await page.evaluate("document.body.scrollHeight")
-            screenshot_url = await bs.take_screenshot()
+            screenshot_url = await mgr.take_screenshot(session_id)
 
             return json.dumps(
                 {
@@ -611,15 +702,17 @@ class BrowserClickTool(BaseTool):
         selector: str | None = None,
         text: str | None = None,
         wait_for_navigation: bool = True,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         if not selector and not text:
             raise ToolExecutionError(self.name, "selector 和 text 至少需提供一个")
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             prev_url = page.url
 
             async def do_click():
@@ -640,9 +733,9 @@ class BrowserClickTool(BaseTool):
 
             new_url = page.url
             title = await page.title()
-            bs.current_url = new_url
-            bs.page_title = title
-            screenshot_url = await bs.take_screenshot()
+            session.current_url = new_url
+            session.page_title = title
+            screenshot_url = await mgr.take_screenshot(session_id)
 
             return json.dumps(
                 {
@@ -712,13 +805,15 @@ class BrowserExtractListTool(BaseTool):
         next_button_selector: str | None = None,
         infinite_scroll: bool = False,
         scroll_rounds: int = 5,
+        session_id: str = "default",
         **_: Any,
     ) -> str:
-        bs = get_browser_state()
-        if not bs.current_url:
+        mgr = get_browser_manager()
+        session = mgr.get_session(session_id)
+        if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
-            page = await bs.get_page()
+            page = await mgr.get_page(session_id)
             all_items: list[dict] = []
             pages_scraped = 0
 
@@ -772,7 +867,7 @@ class BrowserExtractListTool(BaseTool):
                     except Exception:
                         break
 
-            screenshot_url = await bs.take_screenshot()
+            screenshot_url = await mgr.take_screenshot(session_id)
             return json.dumps(
                 {
                     "success": True,

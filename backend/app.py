@@ -56,20 +56,24 @@ async def startup():
     """应用启动时初始化"""
     # 连接 MongoDB
     await connect_db()
-    
+
     # 初始化工具注册表
     state = get_app_state()
     state.initialize()
+
+    # 初始化浏览器会话管理器（惰性启动，此处仅创建单例）
+    from agent.tools.builtin.browser_tools import init_browser_manager
+    init_browser_manager()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     """应用关闭时清理"""
     await disconnect_db()
-    # 关闭 Playwright 浏览器实例（如果已启动）
+    # 关闭所有 Playwright 浏览器会话
     try:
-        from agent.tools.builtin.browser_tools import get_browser_state
-        await get_browser_state().cleanup()
+        from agent.tools.builtin.browser_tools import get_browser_manager
+        await get_browser_manager().cleanup()
     except Exception:
         pass
 

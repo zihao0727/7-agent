@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { createSession, notifySessionsListRefresh } from "@/lib/api";
 import { ArrowUp, Paperclip, Sparkles, X, FileText, FileImage, File } from "lucide-react";
 import { ACCEPTED_FILE_TYPES } from "@/lib/chat-attachment-adapter";
+import { detectUrls, separateUrlAndText } from "@/lib/url-parser";
+import { UrlReferenceChip } from "@/components/UrlReferenceChip";
 
 const SUGGESTIONS = [
   "列出当前目录的文件",
@@ -17,6 +19,11 @@ interface PendingFile {
   name: string;
   contentType: string;
   dataUrl: string;
+}
+
+interface PendingUrl {
+  url: string;
+  id: string;
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -63,17 +70,24 @@ export default function HomePage() {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [pendingUrls, setPendingUrls] = useState<PendingUrl[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = useCallback(async () => {
     const message = input.trim();
-    if ((!message && pendingFiles.length === 0) || submitting) return;
+    if ((!message && pendingFiles.length === 0 && pendingUrls.length === 0) || submitting) return;
     setSubmitting(true);
     try {
       const session = await createSession("新建会话");
       notifySessionsListRefresh();
-      sessionStorage.setItem("sevn:initial-message", message);
+      
+      // 构建最终消息：URLs + 纯文本
+      const urlsText = pendingUrls.map((u) => u.url).join("\n");
+      const finalMessage = [urlsText, message].filter(Boolean).join("\n\n");
+      
+      sessionStorage.setItem("sevn:initial-message", finalMessage);
+      sessionStorage.setItem("sevn:initial-session", session.id);
       if (pendingFiles.length > 0) {
         sessionStorage.setItem(
           "sevn:initial-attachments",
@@ -93,7 +107,7 @@ export default function HomePage() {
       console.error("创建会话失败:", e);
       setSubmitting(false);
     }
-  }, [input, pendingFiles, submitting, router]);
+  }, [input, pendingFiles, pendingUrls, submitting, router]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -103,7 +117,27 @@ export default function HomePage() {
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
+    const value = e.target.value;
+    setInput(value);
+
+    // 自动检测 URL 并提取
+    const { urls, remainingText } = separateUrlAndText(value);
+    
+    // 如果有新 URL 检测到，自动加入 pendingUrls
+    if (urls.length > 0) {
+      const newUrls = urls
+        .filter((u) => !pendingUrls.some((pu) => pu.url === u.url))
+        .map((u) => ({
+          url: u.url,
+          id: `url-${Date.now()}-${Math.random()}`,
+        }));
+      if (newUrls.length > 0) {
+        setPendingUrls((prev) => [...prev, ...newUrls]);
+      }
+      // 更新输入框只显示纯文本部分
+      setInput(remainingText);
+    }
+
     const el = e.target;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
@@ -140,7 +174,11 @@ export default function HomePage() {
     setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const canSubmit = (input.trim().length > 0 || pendingFiles.length > 0) && !submitting;
+  const removeUrl = (id: string) => {
+    setPendingUrls((prev) => prev.filter((u) => u.id !== id));
+  };
+
+  const canSubmit = (input.trim().length > 0 || pendingFiles.length > 0 || pendingUrls.length > 0) && !submitting;
 
   return (
     <div className="flex h-full flex-col items-center justify-center bg-white dark:bg-gray-900 px-6 pb-20">
@@ -174,6 +212,19 @@ export default function HomePage() {
                   key={`${f.name}-${idx}`}
                   file={f}
                   onRemove={() => removeFile(idx)}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* 已检测 URL 预览 */}
+          {pendingUrls.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-4 pt-3 pb-1">
+              {pendingUrls.map((u) => (
+                <UrlReferenceChip
+                  key={u.id}
+                  url={u.url}
+                  onRemove={() => removeUrl(u.id)}
                 />
               ))}
             </div>

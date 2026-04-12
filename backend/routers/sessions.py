@@ -139,14 +139,21 @@ async def add_message(session_id: str, req: AddMessageRequest) -> dict:
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str) -> dict:
-    """删除会话"""
+    """删除会话，并同时关闭对应的浏览器 Context（如果存在）。"""
     db = get_db()
-    
+
     result = await db["sessions"].delete_one(_session_filter(session_id))
-    
+
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="会话不存在")
-    
+
+    # 同步关闭该会话的浏览器 Context，避免资源泄漏
+    try:
+        from agent.tools.builtin.browser_tools import get_browser_manager
+        await get_browser_manager().close_session(session_id)
+    except Exception:
+        pass  # 若浏览器从未启动，静默忽略
+
     logger.info(f"删除会话: {session_id}")
     return {"id": session_id}
 

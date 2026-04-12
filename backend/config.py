@@ -1,5 +1,5 @@
 """
-后端配置 —— 从环境变量读取，提供合理默认值
+后端配置
 """
 
 from __future__ import annotations

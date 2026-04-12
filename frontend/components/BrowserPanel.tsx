@@ -32,9 +32,10 @@ interface BrowserState {
 interface BrowserPanelProps {
   open: boolean;
   onClose: () => void;
+  sessionId?: string;
 }
 
-export function BrowserPanel({ open, onClose }: BrowserPanelProps) {
+export function BrowserPanel({ open, onClose, sessionId }: BrowserPanelProps) {
   const [state, setState] = useState<BrowserState>({
     url: "",
     title: "",
@@ -50,7 +51,8 @@ export function BrowserPanel({ open, onClose }: BrowserPanelProps) {
   const fetchState = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const res = await fetch(`${API_URL}/api/browser/state`, { cache: "no-store" });
+      const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+      const res = await fetch(`${API_URL}/api/browser/state${params}`, { cache: "no-store" });
       if (res.ok) {
         const data: BrowserState = await res.json();
         setState(data);
@@ -65,7 +67,7 @@ export function BrowserPanel({ open, onClose }: BrowserPanelProps) {
     } finally {
       if (showSpinner) setRefreshing(false);
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!open) {

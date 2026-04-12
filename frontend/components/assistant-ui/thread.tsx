@@ -21,6 +21,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   useComposer,
+  useComposerRuntime,
   useThread,
 } from "@assistant-ui/react";
 import { Virtuoso } from "react-virtuoso";
@@ -42,12 +43,14 @@ import {
   X,
 } from "lucide-react";
 import type { FC } from "react";
-import { useCallback, useRef, useMemo, useEffect } from "react";
+import { useCallback, useRef, useMemo, useEffect, useState } from "react";
 import { ToolFallback } from "./tool-fallback";
 import { MarkdownText } from "./markdown-text";
 import { ArchiveDownloadHandler } from "./archive-download-handler";
 import { PdfPreviewHandler } from "./pdf-preview-handler";
 import { cn } from "@/lib/utils";
+import { detectUrls, separateUrlAndText } from "@/lib/url-parser";
+import { UrlReferenceChip } from "@/components/UrlReferenceChip";
 
 // ── 入口组件 ────────────────────────────────────────────────────────────────
 
@@ -550,71 +553,156 @@ const ComposerImageAttachmentChip: FC = () => (
   </AttachmentPrimitive.Root>
 );
 
-const Composer: FC = () => (
-  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-white via-white/90 to-transparent dark:from-gray-900 dark:via-gray-900/90 px-4 pb-6 pt-10 pointer-events-none z-10">
-    <div className="mx-auto max-w-3xl pointer-events-auto">
-      <ComposerAttachmentsBar />
-      <ComposerPrimitive.Root
-        className="relative flex flex-col rounded-3xl border border-gray-200/80 dark:border-gray-700/80
-          bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl shadow-lg hover:shadow-xl
-          focus-within:border-gray-400 dark:focus-within:border-gray-500
-          focus-within:shadow-xl transition-all duration-300"
-      >
-        <ComposerPrimitive.Input
-          autoFocus
-          placeholder="给 AI 助手发送消息..."
-          rows={1}
-          className="min-h-[56px] max-h-48 resize-none bg-transparent px-5 py-4
-            text-[15px] text-gray-900 dark:text-gray-100
-            placeholder:text-gray-400 dark:placeholder:text-gray-500
-            focus:outline-none leading-relaxed"
-        />
-        {/* 回形针在左，发送 / 停止紧贴右侧并排 */}
-        <div className="flex items-center px-3 pb-3 gap-1.5">
-          <ComposerPrimitive.AddAttachment asChild>
-            <button
-              type="button"
-              title="上传附件（支持 Word、PDF、图片、TXT 等）"
-              className="flex h-8 w-8 items-center justify-center rounded-xl text-gray-500
-                hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
-            >
-              <PaperclipIcon className="h-4 w-4" />
-            </button>
-          </ComposerPrimitive.AddAttachment>
-          <ComposerAction />
-        </div>
-      </ComposerPrimitive.Root>
-      <p className="mt-2 text-center text-xs text-gray-300 dark:text-gray-600">
-        AI 可能会出错，重要信息请自行核实
-      </p>
-    </div>
-  </div>
-);
+const Composer: FC = () => {
+  const [pendingUrls, setPendingUrls] = useState<Array<{ url: string; id: string }>>([]);
+  const text = useComposer((c) => c.text);
+  const runtime = useComposerRuntime();
 
-const ComposerAction: FC = () => (
-  <div className="ml-auto flex items-center gap-1.5">
-    <ComposerPrimitive.Send asChild>
-      <button
-        className="flex h-8 w-8 items-center justify-center rounded-xl
-          bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200 text-white dark:text-black transition-colors
-          disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
-        title="发送 (Enter)"
+  const handleInputChange = useCallback(
+    (newValue: string) => {
+      // 检测新输入中是否有 URL
+      const { urls, remainingText } = separateUrlAndText(newValue);
+
+      if (urls.length > 0) {
+        // 有新 URL 被检测到，加入 pending
+        const newUrls = urls
+          .filter((u) => !pendingUrls.some((pu) => pu.url === u.url))
+          .map((u) => ({
+            url: u.url,
+            id: `url-${Date.now()}-${Math.random()}`,
+          }));
+        if (newUrls.length > 0) {
+          setPendingUrls((prev) => [...prev, ...newUrls]);
+        }
+        // 更新输入框只显示纯文本部分
+        runtime.setText(remainingText);
+      } else {
+        // 无 URL，直接更新
+        runtime.setText(newValue);
+      }
+    },
+    [pendingUrls, runtime]
+  );
+
+  const removeUrl = (id: string) => {
+    setPendingUrls((prev) => prev.filter((u) => u.id !== id));
+  };
+
+  // 发送前拼接 URL
+  const ComposerActionWithUrls: FC = () => (
+    <div className="ml-auto flex items-center gap-1.5">
+      <ComposerPrimitive.Send
+        asChild
+        onClick={() => {
+          // 发送时如果有 pending URL，将其添加到消息头
+          if (pendingUrls.length > 0) {
+            const urlsText = pendingUrls.map((u) => u.url).join("\n");
+            const currentValue = text;
+            const finalMessage = [urlsText, currentValue].filter(Boolean).join("\n\n");
+            runtime.setText(finalMessage);
+            setPendingUrls([]);
+            // 让发送触发
+            setTimeout(() => {
+              document.querySelector('[title="发送 (Enter)"]')?.dispatchEvent(
+                new MouseEvent("click", { bubbles: true })
+              );
+            }, 0);
+          }
+        }}
       >
-        <ArrowUpIcon className="h-4 w-4" />
-      </button>
-    </ComposerPrimitive.Send>
-    <ComposerPrimitive.Cancel asChild>
-      <button
-        className="flex h-8 w-8 items-center justify-center rounded-xl
-          border-2 border-gray-300 dark:border-gray-600 hover:border-red-400
-          text-gray-500 hover:text-red-500 transition-colors"
-        title="停止生成"
-      >
-        <SquareIcon className="h-3.5 w-3.5" />
-      </button>
-    </ComposerPrimitive.Cancel>
-  </div>
-);
+        <button
+          className="flex h-8 w-8 items-center justify-center rounded-xl
+            bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200 text-white dark:text-black transition-colors
+            disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+          title="发送 (Enter)"
+        >
+          <ArrowUpIcon className="h-4 w-4" />
+        </button>
+      </ComposerPrimitive.Send>
+      <ComposerPrimitive.Cancel asChild>
+        <button
+          className="flex h-8 w-8 items-center justify-center rounded-xl
+            border-2 border-gray-300 dark:border-gray-600 hover:border-red-400
+            text-gray-500 hover:text-red-500 transition-colors"
+          title="停止生成"
+        >
+          <SquareIcon className="h-3.5 w-3.5" />
+        </button>
+      </ComposerPrimitive.Cancel>
+    </div>
+  );
+
+  return (
+    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-white via-white/90 to-transparent dark:from-gray-900 dark:via-gray-900/90 px-4 pb-6 pt-10 pointer-events-none z-10">
+      <div className="mx-auto max-w-3xl pointer-events-auto">
+        <ComposerAttachmentsBar />
+
+        {/* URL 参考卡片 */}
+        {pendingUrls.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-1 mb-2">
+            {pendingUrls.map((u) => (
+              <UrlReferenceChip
+                key={u.id}
+                url={u.url}
+                onRemove={() => removeUrl(u.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        <ComposerPrimitive.Root
+          className="relative flex flex-col rounded-3xl border border-gray-200/80 dark:border-gray-700/80
+            bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl shadow-lg hover:shadow-xl
+            focus-within:border-gray-400 dark:focus-within:border-gray-500
+            focus-within:shadow-xl transition-all duration-300"
+        >
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => handleInputChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                // 触发发送
+                if (pendingUrls.length > 0) {
+                  const urlsText = pendingUrls.map((u) => u.url).join("\n");
+                  const newValue = [urlsText, text].filter(Boolean).join("\n\n");
+                  runtime.setText(newValue);
+                  setPendingUrls([]);
+                }
+                document.querySelector('[title="发送 (Enter)"]')?.dispatchEvent(
+                  new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
+                );
+              }
+            }}
+            placeholder="给 AI 助手发送消息..."
+            className="min-h-[56px] max-h-48 resize-none bg-transparent px-5 py-4
+              text-[15px] text-gray-900 dark:text-gray-100
+              placeholder:text-gray-400 dark:placeholder:text-gray-500
+              focus:outline-none leading-relaxed rounded-3xl w-full"
+          />
+          {/* 回形针在左，发送 / 停止紧贴右侧并排 */}
+          <div className="flex items-center px-3 pb-3 gap-1.5">
+            <ComposerPrimitive.AddAttachment asChild>
+              <button
+                type="button"
+                title="上传附件（支持 Word、PDF、图片、TXT 等）"
+                className="flex h-8 w-8 items-center justify-center rounded-xl text-gray-500
+                  hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+              >
+                <PaperclipIcon className="h-4 w-4" />
+              </button>
+            </ComposerPrimitive.AddAttachment>
+            <ComposerActionWithUrls />
+          </div>
+        </ComposerPrimitive.Root>
+        <p className="mt-2 text-center text-xs text-gray-300 dark:text-gray-600">
+          AI 可能会出错，重要信息请自行核实
+        </p>
+      </div>
+    </div>
+  );
+};
 
 // ── 通用图标按钮 ────────────────────────────────────────────────────────────
 

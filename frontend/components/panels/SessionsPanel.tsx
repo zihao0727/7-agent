@@ -1,17 +1,43 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { Plus, Trash2, RefreshCw, Loader } from "lucide-react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import {
+  Plus,
+  Search,
+  ChevronDown,
+  RefreshCw,
+  Loader2,
+  Trash2,
+  MessageCircle,
+} from "lucide-react";
 import {
   fetchSessions,
   createSession,
   deleteSession,
   type SessionInfo,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 interface SessionsPanelProps {
   onSelectSession: (sessionId: string | undefined) => void;
   currentSessionId?: string;
+}
+
+function formatSessionTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffM = Math.floor(diffMs / 60000);
+  const diffH = Math.floor(diffMs / 3600000);
+  const diffD = Math.floor(diffMs / 86400000);
+
+  if (diffM < 1) return "刚刚";
+  if (diffM < 60) return `${diffM} 分钟前`;
+  if (diffH < 24) return `${diffH} 小时前`;
+  if (diffD === 1) return "昨天";
+  if (diffD < 7) return `${diffD} 天前`;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 export function SessionsPanel({
@@ -42,7 +68,6 @@ export function SessionsPanel({
 
   useEffect(() => {
     const onRefresh = () => {
-      // 列表已展示时后台刷新，避免整页闪烁
       void loadSessions({ silent: true });
     };
     window.addEventListener("sevn:sessions-refresh", onRefresh);
@@ -65,7 +90,6 @@ export function SessionsPanel({
     try {
       await deleteSession(id);
       await loadSessions();
-      // 如果删除的是当前激活会话，则清空选中状态
       if (id === currentSessionId) {
         onSelectSession(undefined);
       }
@@ -74,76 +98,117 @@ export function SessionsPanel({
     }
   };
 
+  const sortedSessions = useMemo(() => {
+    return [...sessions].sort(
+      (a, b) =>
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    );
+  }, [sessions]);
+
   return (
-    <div className="flex flex-col h-full gap-2">
-      {/* 标题和操作按钮 */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-          会话列表
+    <div className="flex h-full flex-col gap-1">
+      {/* 模块标题 */}
+      <div className="text-[11px] font-medium text-gray-500 dark:text-gray-400 mb-1 px-2">聊天</div>
+
+      {/* 新建聊天 */}
+      <button
+        type="button"
+        onClick={handleCreateSession}
+        disabled={loading}
+        className={cn(
+          "group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-all",
+          "text-gray-700 dark:text-gray-300",
+          "hover:bg-gray-200/50 dark:hover:bg-white/5",
+          "disabled:pointer-events-none disabled:opacity-50"
+        )}
+      >
+        <Plus className="h-4 w-4" />
+        <span className="text-[13px] font-medium">新聊天</span>
+      </button>
+
+      {/* 搜索聊天 (仅样式占位) */}
+      <button
+        type="button"
+        className={cn(
+          "group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-all mb-2",
+          "text-gray-700 dark:text-gray-300",
+          "hover:bg-gray-200/50 dark:hover:bg-white/5",
+        )}
+      >
+        <Search className="h-4 w-4" />
+        <span className="text-[13px] font-medium">搜索聊天</span>
+      </button>
+
+      {/* 最近对话区块标题 */}
+      <div className="flex items-center justify-between px-2 py-1.5 group cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors">
+        <div className="flex items-center gap-1.5">
+          <ChevronDown className="h-3.5 w-3.5" />
+          <span className="text-[12px] font-medium">最近</span>
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => void loadSessions()}
-            disabled={loading}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 disabled:opacity-50"
-            title="刷新"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          </button>
-          <button
-            onClick={handleCreateSession}
-            disabled={loading}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 disabled:opacity-50"
-            title="新建会话"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
+        <div className="flex items-center gap-2">
+          {loading && <Loader2 className="h-3 w-3 animate-spin" />}
+          <span className="text-[10px] font-medium bg-gray-200/50 dark:bg-white/10 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400">
+            {sessions.length}
+          </span>
         </div>
       </div>
 
-      {/* 错误信息 */}
       {error && (
-        <p className="text-xs text-red-500 mb-2 px-1">{error}</p>
+        <p className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:bg-red-950/40 dark:text-red-400">
+          {error}
+        </p>
       )}
 
-      {/* 会话列表 */}
       {loading && sessions.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center">
-          <RefreshCw className="h-4 w-4 animate-spin text-gray-400" />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 py-8">
+          <Loader2 className="h-6 w-6 animate-spin text-gray-300 dark:text-gray-600" />
         </div>
       ) : (
-        <ul className="flex-1 overflow-y-auto space-y-1.5 pr-0.5">
-          {sessions.map((session) => (
-            <li
-              key={session.id}
-              onClick={() => onSelectSession(session.id)}
-              className={`flex items-start justify-between gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-colors
-                ${
-                  currentSessionId === session.id
-                    ? "bg-white dark:bg-gray-800 border-l-2 border-gray-900 dark:border-gray-100 shadow-sm"
-                    : "hover:bg-gray-200/60 dark:hover:bg-gray-800/50"
-                }`}
-            >
-              <div className="min-w-0 flex-1 flex items-center">
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-                  {session.title}
-                </p>
-              </div>
-              <button
-                onClick={(e) => handleDeleteSession(session.id, e)}
-                className="flex-shrink-0 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900
-                  text-gray-300 hover:text-red-500 transition-colors"
-                title="删除"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </li>
-          ))}
-          {sessions.length === 0 && !loading && (
-            <li className="text-xs text-gray-400 text-center py-4">
-              暂无会话，点击 + 创建
-            </li>
-          )}
+        <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5 [-ms-overflow-style:none] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300/80 dark:[&::-webkit-scrollbar-thumb]:bg-gray-600">
+          {sortedSessions.map((session) => {
+            const active = currentSessionId === session.id;
+
+            return (
+              <li key={session.id} className="group/row relative">
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(session.id)}
+                  className={cn(
+                    "flex w-full items-center rounded-lg px-3 py-2.5 pr-8 text-left transition-all",
+                    active
+                      ? "bg-gray-200/80 dark:bg-white/10"
+                      : "hover:bg-gray-200/50 dark:hover:bg-white/5"
+                  )}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={cn(
+                        "block truncate text-[13px] leading-snug",
+                        active
+                          ? "font-medium text-gray-900 dark:text-gray-100"
+                          : "text-gray-700 dark:text-gray-300"
+                      )}
+                    >
+                      {session.title || "新对话"}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleDeleteSession(session.id, e)}
+                  className={cn(
+                    "absolute right-2 top-1/2 -translate-y-1/2 rounded p-1",
+                    "text-gray-400 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-500",
+                    "group-hover/row:opacity-100",
+                    "dark:text-gray-500 dark:hover:text-red-400"
+                  )}
+                  title="删除会话"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

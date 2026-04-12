@@ -17,11 +17,11 @@ const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
 interface SidebarProps {
   isOpen: boolean;
   onToggle: (open: boolean) => void;
+  activeTab?: TabId;
+  onTabChange?: (tab: TabId) => void;
 }
 
-export function Sidebar({ isOpen, onToggle }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState<TabId>("tools");
-
+export function Sidebar({ isOpen, onToggle, activeTab = "tools", onTabChange }: SidebarProps) {
   return (
     <aside className={`flex flex-col flex-shrink-0 border-r border-gray-200 dark:border-gray-700
       bg-gray-100 dark:bg-gray-900 overflow-hidden transition-all duration-300
@@ -46,7 +46,7 @@ export function Sidebar({ isOpen, onToggle }: SidebarProps) {
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
-            onClick={() => setActiveTab(id)}
+            onClick={() => onTabChange?.(id)}
             className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-xs transition-colors
               ${activeTab === id
                 ? "text-gray-900 dark:text-gray-100 border-b-2 border-gray-900 dark:border-gray-100 -mb-px"

@@ -19,7 +19,8 @@ router = APIRouter(tags=["chat"])
 
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
-    id: str | None = None               # useChat 发来的 thread id（可选）
+    id: str | None = None               # useChat 内部 thread id（SDK 自动发送）
+    sessionId: str | None = None        # 显式会话 ID（由前端 body 注入，用于浏览器 session 隔离）
     system: str | None = None           # 可选：前端自定义 system prompt
     model: str = "deepseek-chat"        # 可选：模型选择，默认 deepseek-chat
 
@@ -50,9 +51,12 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     messages_with_paths = await materialize_chat_uploads(req.messages, model=model)
     openai_messages = ai_sdk_to_openai(messages_with_paths, model=model)
 
+    # sessionId 优先（前端 body 显式注入），其次 id（SDK thread id），最后 default
+    session_id = req.sessionId or req.id or "default"
+
     logger.info(
-        "Chat 请求 thread=%s，消息数=%d，工具数=%d，模型=%s",
-        req.id, len(req.messages), len(state.tool_registry), model,
+        "Chat 请求 session=%s，消息数=%d，工具数=%d，模型=%s",
+        session_id, len(req.messages), len(state.tool_registry), model,
     )
 
     async def generator():
@@ -61,6 +65,7 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
             state=state,
             system_prompt=req.system,
             model=model,
+            session_id=session_id,
         ):
             yield line
 

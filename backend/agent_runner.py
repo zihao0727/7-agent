@@ -72,11 +72,24 @@ def _make_client(model: str = "deepseek-chat") -> AsyncOpenAI:
 
 # ── 单步 Agent 执行 ───────────────────────────────────────────────────────────
 
+BROWSER_TOOL_NAMES = frozenset({
+    "browser_navigate",
+    "browser_screenshot",
+    "browser_extract_text",
+    "browser_extract_attrs",
+    "browser_extract_table",
+    "browser_scroll",
+    "browser_click",
+    "browser_extract_list",
+})
+
+
 async def run_agent_streaming(
     messages: list[dict],
     state: AppState,
     system_prompt: str | None = None,
     model: str = "deepseek-chat",
+    session_id: str = "default",
 ) -> AsyncIterator[str]:
     """
     执行单步 Agent 操作，逐行 yield SSE 数据流字符串。
@@ -191,6 +204,9 @@ async def run_agent_streaming(
         tool_name = ai_tc["toolName"]
         # 剥离 _purpose 字段：该字段仅用于前端展示，不传入工具执行
         exec_args = {k: v for k, v in ai_tc["args"].items() if k != "_purpose"}
+        # 浏览器工具自动注入 session_id，实现多会话隔离
+        if tool_name in BROWSER_TOOL_NAMES:
+            exec_args.setdefault("session_id", session_id)
         try:
             result = await state.tool_registry.execute(tool_name, exec_args)
             logger.info("工具 '%s' 执行完成", tool_name)

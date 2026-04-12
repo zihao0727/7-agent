@@ -6,6 +6,7 @@
  * 根据明暗模式自动切换高亮主题
  */
 
+import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -117,15 +118,25 @@ function escapeHtml(text: string): string {
 }
 
 const markdownComponents: Components = {
-  code({ inline, className, children, ...props }: any) {
-    const match = /language-(\w+)/.exec(className || "");
-    const language = match ? match[1] : "";
-    const value = String(children).replace(/\n$/, "");
+  // pre 只在块级代码（三反引号）时出现，在此拦截并渲染 CodeBlock，
+  // 避免 CodeBlock(div) 被嵌入 <p> 导致 hydration 错误。
+  pre({ children }: any) {
+    const child = React.Children.toArray(children).find(
+      (c) => React.isValidElement(c)
+    ) as React.ReactElement | undefined;
 
-    if (!inline) {
+    if (child) {
+      const className = (child.props as any)?.className || "";
+      const match = /language-(\w+)/.exec(className);
+      const language = match ? match[1] : "";
+      const value = String((child.props as any)?.children ?? "").replace(/\n$/, "");
       return <CodeBlock language={language} value={value} />;
     }
+    return <pre>{children}</pre>;
+  },
 
+  // code 只处理行内代码（块级代码由上方 pre 组件接管）
+  code({ className, children, ...props }: any) {
     return (
       <code
         className="rounded bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 font-mono text-sm font-medium text-gray-900 dark:text-gray-100"
@@ -197,8 +208,16 @@ const markdownComponents: Components = {
     );
   },
 
-  p({ ...props }) {
-    return <p className="my-3 pt-0.5 leading-7" {...props} />;
+  p({ children, ...props }: any) {
+    // 如果子节点包含块级自定义组件（如 CodeBlock），改用 div 避免 <p><div> 非法嵌套
+    const hasBlockChild = React.Children.toArray(children).some(
+      (child) => React.isValidElement(child) && typeof child.type !== "string"
+    );
+    return hasBlockChild ? (
+      <div className="my-3 pt-0.5 leading-7" {...props}>{children}</div>
+    ) : (
+      <p className="my-3 pt-0.5 leading-7" {...props}>{children}</p>
+    );
   },
 
   hr({ ...props }) {

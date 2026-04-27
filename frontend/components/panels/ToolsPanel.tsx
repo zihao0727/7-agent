@@ -42,10 +42,10 @@ export function ToolsPanel() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 uppercase tracking-wide">
+        <div className="flex items-center gap-1.5 text-sm font-medium text-gray-500 uppercase tracking-wide">
           <Wrench className="h-3.5 w-3.5" />
           工具
-          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-xs">
+          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-sm">
             {tools.filter((t) => t.enabled).length}/{tools.length}
           </span>
         </div>
@@ -59,7 +59,7 @@ export function ToolsPanel() {
       </div>
 
       {error && (
-        <p className="text-xs text-red-500 mb-2 px-1">{error}</p>
+        <p className="text-sm text-red-500 mb-2 px-1">{error}</p>
       )}
 
       {loading && tools.length === 0 ? (
@@ -87,18 +87,18 @@ export function ToolsPanel() {
                 />
               </button>
               <div className="min-w-0 flex-1">
-                <p className={`text-xs font-mono font-medium truncate
+                <p className={`text-sm font-mono font-medium truncate
                   ${tool.enabled ? "text-gray-900 dark:text-gray-100" : "text-gray-400 dark:text-gray-500"}`}>
                   {tool.name}
                 </p>
-                <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5 leading-relaxed line-clamp-2">
+                <p className="text-sm text-gray-400 dark:text-gray-500 mt-0.5 leading-relaxed line-clamp-2">
                   {tool.description}
                 </p>
               </div>
             </li>
           ))}
           {tools.length === 0 && !loading && (
-            <li className="text-xs text-gray-400 text-center py-4">暂无工具</li>
+            <li className="text-sm text-gray-400 text-center py-4">暂无工具</li>
           )}
         </ul>
       )}

@@ -1,30 +1,118 @@
-"""
-会话管理 API 路由 —— CRUD 操作
-"""
-
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from backend.auth_dependencies import require_current_user
 from backend.config import get_settings
 from backend.db import get_db
+from backend.memory_service import extract_memory_from_session
 from backend.models import Message, Session
+from backend.session_access import assert_session_owned, session_filter_for_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
+SUMMARY_MODEL = "deepseek-v4-flash"
 
-def _session_filter(session_id: str) -> dict:
-    """
-    兼容历史数据：既支持 _id，也支持早期误写入的 id 字段。
-    """
-    return {"$or": [{"_id": session_id}, {"id": session_id}]}
+
+def _normalize_text(value: str) -> str:
+    return " ".join((value or "").split()).strip("，。！？?!；;、")
+
+
+def _message_text(message: dict[str, Any], max_chars: int = 500) -> str:
+    parts: list[str] = []
+    content = _normalize_text(str(message.get("content") or ""))
+    if content:
+        parts.append(content)
+
+    reasoning = _normalize_text(str(message.get("reasoning_content") or ""))
+    if reasoning:
+        parts.append(reasoning)
+
+    for part in message.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            text = _normalize_text(str(part.get("text") or ""))
+            if text:
+                parts.append(text)
+        elif part.get("type") == "reasoning":
+            text = _normalize_text(str(part.get("text") or ""))
+            if text:
+                parts.append(text)
+
+    merged = _normalize_text(" ".join(parts))
+    return merged[:max_chars]
+
+
+def _fallback_title(messages: list[dict[str, Any]]) -> str:
+    for role in ("user", "assistant"):
+        for message in messages:
+            if message.get("role") != role:
+                continue
+            text = _message_text(message, max_chars=48)
+            if text:
+                head = re.split(r"[，。！？?!\n]", text, maxsplit=1)[0].strip()
+                return head[:18] if len(head) > 18 else head
+    return "新建会话"
+
+
+async def _summarize_title(messages: list[dict[str, Any]]) -> str:
+    settings = get_settings()
+    if not settings.deepseek_api_key:
+        return _fallback_title(messages)
+
+    chat_history = []
+    for message in messages[:12]:
+        role = str(message.get("role") or "user")
+        text = _message_text(message, max_chars=600)
+        if text:
+            chat_history.append((role, text))
+
+    if not chat_history:
+        return _fallback_title(messages)
+
+    prompt = (
+        "请阅读下面的多轮对话，生成一个简短中文标题。"
+        "要求：只输出一行标题；不要引号；不要问号结尾；不要输出“新建会话”“聊天”等空泛词。"
+    )
+    for role, text in chat_history:
+        role_label = "用户" if role == "user" else "助手"
+        prompt += f"\n{role_label}: {text}"
+
+    try:
+        client = AsyncOpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+        )
+        response = await client.chat.completions.create(
+            model=SUMMARY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是会话标题生成器，只返回简洁标题本身。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=60,
+            temperature=0.2,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        content = (response.choices[0].message.content or "").strip()
+        title = _normalize_text(content.splitlines()[0] if content else "")
+        if title and title not in {"新建会话", "聊天", "对话", "会话"}:
+            return title[:24]
+    except Exception as exc:
+        logger.warning("会话标题总结失败，回退本地规则: %s", exc)
+
+    return _fallback_title(messages)
 
 
 class CreateSessionRequest(BaseModel):
@@ -33,239 +121,182 @@ class CreateSessionRequest(BaseModel):
 
 
 class AddMessageRequest(BaseModel):
-    role: str  # "user" | "assistant"
+    role: str
     content: str
     tool_invocations: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
     parts: list[dict[str, Any]] | None = None
     experimental_attachments: list[dict[str, Any]] | None = None
 
 
 @router.post("/sessions")
-async def create_session(req: CreateSessionRequest) -> dict:
-    """创建新会话"""
+async def create_session(
+    req: CreateSessionRequest, current_user: dict = Depends(require_current_user)
+) -> dict:
     db = get_db()
     session = Session(title=req.title, description=req.description)
-
-    # 统一使用 _id，避免后续按 _id 查询时 404。
     session_doc = session.model_dump()
     session_doc["_id"] = session_doc.pop("id")
+    session_doc["user_id"] = current_user["id"]
     await db["sessions"].insert_one(session_doc)
-    logger.info(f"创建会话: {session.id}")
-    
     return {"id": session.id, "title": session.title}
 
 
 @router.get("/sessions")
-async def list_sessions() -> list[dict]:
-    """获取所有会话列表（不含消息）"""
+async def list_sessions(current_user: dict = Depends(require_current_user)) -> list[dict]:
     db = get_db()
-    sessions = await db["sessions"].find({}).sort("created_at", -1).to_list(None)
-    
+    sessions = (
+        await db["sessions"]
+        .find({"user_id": current_user["id"]})
+        .sort("updated_at", -1)
+        .to_list(None)
+    )
     return [
         {
-            "id": str(s.get("_id") or s.get("id")),
-            "title": s["title"],
-            "description": s.get("description"),
-            "created_at": s["created_at"].isoformat() if isinstance(s["created_at"], datetime) else s["created_at"],
-            "updated_at": s["updated_at"].isoformat() if isinstance(s["updated_at"], datetime) else s["updated_at"],
-            "message_count": len(s.get("messages", [])),
+            "id": str(session.get("_id") or session.get("id")),
+            "title": session["title"],
+            "description": session.get("description"),
+            "created_at": session["created_at"].isoformat()
+            if isinstance(session["created_at"], datetime)
+            else session["created_at"],
+            "updated_at": session["updated_at"].isoformat()
+            if isinstance(session["updated_at"], datetime)
+            else session["updated_at"],
+            "message_count": len(session.get("messages", [])),
         }
-        for s in sessions
+        for session in sessions
     ]
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str) -> dict:
-    """获取单个会话（含所有消息）"""
-    db = get_db()
-    session = await db["sessions"].find_one(_session_filter(session_id))
-    
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
-    messages = session.get("messages", [])
-    # 按 created_at 升序排列，保证问答顺序正确；时间相同时保留数组插入顺序（稳定排序）
+async def get_session(
+    session_id: str, current_user: dict = Depends(require_current_user)
+) -> dict:
+    session = await assert_session_owned(session_id, current_user["id"])
     messages = sorted(
-        messages,
-        key=lambda m: m.get("created_at") or datetime.min,
+        session.get("messages", []),
+        key=lambda item: item.get("created_at") or datetime.min,
     )
-    # 将每条消息的 created_at 序列化为 ISO 字符串，便于前端解析
     serialized_messages = []
-    for m in messages:
-        msg = dict(m)
-        if isinstance(msg.get("created_at"), datetime):
-            msg["created_at"] = msg["created_at"].isoformat()
-        serialized_messages.append(msg)
+    for message in messages:
+        row = dict(message)
+        if isinstance(row.get("created_at"), datetime):
+            row["created_at"] = row["created_at"].isoformat()
+        serialized_messages.append(row)
 
     return {
         "id": str(session.get("_id") or session.get("id")),
         "title": session["title"],
         "description": session.get("description"),
         "messages": serialized_messages,
-        "created_at": session["created_at"].isoformat() if isinstance(session["created_at"], datetime) else session["created_at"],
-        "updated_at": session["updated_at"].isoformat() if isinstance(session["updated_at"], datetime) else session["updated_at"],
+        "created_at": session["created_at"].isoformat()
+        if isinstance(session["created_at"], datetime)
+        else session["created_at"],
+        "updated_at": session["updated_at"].isoformat()
+        if isinstance(session["updated_at"], datetime)
+        else session["updated_at"],
     }
 
 
 @router.post("/sessions/{session_id}/messages")
-async def add_message(session_id: str, req: AddMessageRequest) -> dict:
-    """向会话添加消息"""
+async def add_message(
+    session_id: str,
+    req: AddMessageRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_current_user),
+) -> dict:
     db = get_db()
-    
-    session = await db["sessions"].find_one(_session_filter(session_id))
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
+    await assert_session_owned(session_id, current_user["id"])
+
     message = Message(
         role=req.role,
         content=req.content,
         tool_invocations=req.tool_invocations,
+        reasoning_content=req.reasoning_content,
         parts=req.parts,
         experimental_attachments=req.experimental_attachments,
     )
-    
-    # 将消息追加到会话
     await db["sessions"].update_one(
-        _session_filter(session_id),
+        session_filter_for_user(session_id, current_user["id"]),
         {
             "$push": {"messages": message.model_dump()},
-            "$set": {"updated_at": datetime.utcnow()}
-        }
+            "$set": {"updated_at": datetime.utcnow()},
+        },
     )
-    
-    logger.info(f"向会话 {session_id} 添加消息: {message.id}")
+
+    if req.role == "assistant":
+        session = await db["sessions"].find_one(
+            session_filter_for_user(session_id, current_user["id"])
+        )
+        if session:
+            background_tasks.add_task(
+                extract_memory_from_session,
+                user_id=current_user["id"],
+                session_id=session_id,
+                messages=session.get("messages", []),
+            )
     return {"id": message.id, "created_at": message.created_at.isoformat()}
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str) -> dict:
-    """删除会话，并同时关闭对应的浏览器 Context（如果存在）。"""
+async def delete_session(
+    session_id: str, current_user: dict = Depends(require_current_user)
+) -> dict:
     db = get_db()
-
-    result = await db["sessions"].delete_one(_session_filter(session_id))
-
+    result = await db["sessions"].delete_one(
+        session_filter_for_user(session_id, current_user["id"])
+    )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 同步关闭该会话的浏览器 Context，避免资源泄漏
     try:
         from agent.tools.builtin.browser_tools import get_browser_manager
+
         await get_browser_manager().close_session(session_id)
     except Exception:
-        pass  # 若浏览器从未启动，静默忽略
+        pass
 
-    logger.info(f"删除会话: {session_id}")
     return {"id": session_id}
 
 
 @router.delete("/sessions/{session_id}/messages/{message_index}")
-async def delete_messages_after(session_id: str, message_index: int) -> dict:
-    """删除指定消息索引及之后的所有消息"""
+async def delete_messages_after(
+    session_id: str,
+    message_index: int,
+    current_user: dict = Depends(require_current_user),
+) -> dict:
     db = get_db()
-    
-    session = await db["sessions"].find_one(_session_filter(session_id))
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
+    session = await assert_session_owned(session_id, current_user["id"])
     messages = session.get("messages", [])
-    
-    if message_index < 0 or message_index >= len(messages):
+    if message_index < 0 or message_index > len(messages):
         raise HTTPException(status_code=400, detail="消息索引无效")
-    
-    # 保留前 message_index 条消息（删除从 message_index 开始的所有消息）
+
     remaining_messages = messages[:message_index]
-    
     await db["sessions"].update_one(
-        _session_filter(session_id),
+        session_filter_for_user(session_id, current_user["id"]),
         {
             "$set": {
                 "messages": remaining_messages,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.utcnow(),
             }
-        }
+        },
     )
-    
-    logger.info(f"删除会话 {session_id} 中索引 {message_index} 及之后的消息")
     return {"deleted_count": len(messages) - message_index}
 
 
 @router.post("/sessions/{session_id}/summarize")
-async def summarize_session(session_id: str) -> dict:
-    """使用 DeepSeek 生成会话标题"""
+async def summarize_session(
+    session_id: str, current_user: dict = Depends(require_current_user)
+) -> dict:
     db = get_db()
-    
-    session = await db["sessions"].find_one(_session_filter(session_id))
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
-    messages = session.get("messages", [])
-    
-    if len(messages) == 0:
-        # 如果没有消息，返回默认标题而不是错误
-        default_title = "新建会话"
-        await db["sessions"].update_one(
-            _session_filter(session_id),
-            {"$set": {"title": default_title}}
-        )
-        return {"title": default_title}
-    
-    # 构建聊天历史用于摘要生成
-    chat_history = []
-    for msg in messages[:10]:  # 仅使用前10条消息以节省 token
-        chat_history.append({
-            "role": msg.get("role", "user"),
-            "content": msg.get("content", "")[:500]  # 限制单条消息长度
-        })
-    
-    # 调用 DeepSeek（OpenAI 兼容）生成标题
-    try:
-        settings = get_settings()
-        if not settings.deepseek_api_key:
-            raise ValueError("DeepSeek API Key 未配置")
-
-        client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-        )
-
-        prompt = "请根据以下聊天记录，用5-10个字生成一个简洁标题，仅返回标题文本：\n\n"
-        for msg in chat_history:
-            role_label = "用户" if msg["role"] == "user" else "助手"
-            prompt += f"{role_label}: {msg['content']}\n"
-
-        response = await client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=[
-                {"role": "system", "content": "你是一个标题生成助手，只返回标题文本，不要解释。"},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=50,
-            temperature=0.2,
-        )
-
-        title = (response.choices[0].message.content or "").strip().strip('"').strip("'")
-        title = " ".join(title.split())
-        if not title:
-            title = "新建会话"
-        
-        # 更新会话标题（不更新 updated_at，保持创建顺序）
-        await db["sessions"].update_one(
-            _session_filter(session_id),
-            {"$set": {"title": title}}
-        )
-        
-        logger.info(f"为会话 {session_id} 生成标题: {title}")
-        return {"title": title}
-        
-    except Exception as e:
-        logger.error(f"生成标题失败: {e}")
-        # 生成失败时使用默认标题
-        default_title = "新建会话"
-        try:
-            await db["sessions"].update_one(
-                _session_filter(session_id),
-                {"$set": {"title": default_title}}
-            )
-        except:
-            pass
-        raise HTTPException(status_code=500, detail=f"生成标题失败: {str(e)}")
+    session = await assert_session_owned(session_id, current_user["id"])
+    messages = sorted(
+        session.get("messages", []),
+        key=lambda item: item.get("created_at") or datetime.min,
+    )
+    title = await _summarize_title(messages) if messages else "新建会话"
+    await db["sessions"].update_one(
+        session_filter_for_user(session_id, current_user["id"]),
+        {"$set": {"title": title}},
+    )
+    return {"title": title}

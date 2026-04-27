@@ -16,6 +16,7 @@ class Message(BaseModel):
     role: str  # "user" | "assistant" | "system"
     content: str  # 消息内容（纯文本或 markdown）
     tool_invocations: Optional[list[dict[str, Any]]] = None  # 工具调用
+    reasoning_content: Optional[str] = None  # thinking/reasoning 原文，供下一轮请求回传
     # AI SDK parts 数组，保留文本与工具调用的交错顺序，用于历史记录精确恢复
     parts: Optional[list[dict[str, Any]]] = None
     # 用户消息附件元数据（仅文件名/类型，不含 data URL，便于历史记录展示）

@@ -22,6 +22,8 @@ import {
   ThreadPrimitive,
   useComposer,
   useComposerRuntime,
+  useEditComposer,
+  useMessageRuntime,
   useThread,
 } from "@assistant-ui/react";
 import { Virtuoso } from "react-virtuoso";
@@ -49,7 +51,7 @@ import { MarkdownText } from "./markdown-text";
 import { ArchiveDownloadHandler } from "./archive-download-handler";
 import { PdfPreviewHandler } from "./pdf-preview-handler";
 import { cn } from "@/lib/utils";
-import { detectUrls, separateUrlAndText } from "@/lib/url-parser";
+import { detectUrls, separateUrlAndText, splitTextByUrls } from "@/lib/url-parser";
 import { UrlReferenceChip } from "@/components/UrlReferenceChip";
 
 // ── 入口组件 ────────────────────────────────────────────────────────────────
@@ -80,6 +82,7 @@ export const Thread: FC = () => {
   const messageComponents = useMemo(
     () => ({
       UserMessage: UserMessage,
+      UserEditComposer: UserEditComposer,
       AssistantMessage: AssistantMessage,
     }),
     []
@@ -262,9 +265,44 @@ const MessageBubbleImageAttachmentChip: FC = () => (
   </AttachmentPrimitive.Root>
 );
 
+/** 用户消息：普通文字原样换行展示；仅 http(s)/ftp 链接片段单行省略，避免撑破布局 */
+const UserMessageText: FC<any> = ({ text }) => {
+  if (text == null || text === "") return null;
+  const s = String(text);
+  const parts = splitTextByUrls(s);
+  return (
+    <p
+      className={cn(
+        "m-0 min-w-0 max-w-full select-text",
+        "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+      )}
+    >
+      {parts.map((part, i) =>
+        part.type === "url" ? (
+          <a
+            key={i}
+            href={part.value}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(
+              "inline-block max-w-full min-w-0 align-baseline truncate",
+              "text-blue-600 underline decoration-blue-600/40 underline-offset-2",
+              "dark:text-blue-400 dark:decoration-blue-400/40",
+            )}
+          >
+            {part.value}
+          </a>
+        ) : (
+          <span key={i}>{part.value}</span>
+        ),
+      )}
+    </p>
+  );
+};
+
 const UserMessage: FC = () => (
   <MessagePrimitive.Root className="group mb-8 flex justify-end animate-in fade-in slide-in-from-bottom-2 duration-300">
-    <div className="flex flex-col items-end gap-1.5 max-w-[80%]">
+    <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1.5">
       <MessagePrimitive.If hasAttachments>
         <div className="mb-1 flex w-full flex-wrap justify-end gap-2">
           <MessagePrimitive.Attachments
@@ -277,12 +315,13 @@ const UserMessage: FC = () => (
           />
         </div>
       </MessagePrimitive.If>
-      {/* 消息气泡 */}
+      {/* 消息气泡（与助手侧一致的浅底 + 边框，避免深色反色块） */}
       <div
-        className="rounded-3xl rounded-br-sm bg-zinc-800 dark:bg-zinc-200 px-5 py-3 text-[15px]
-          text-white dark:text-black leading-relaxed shadow-sm"
+        className="w-full min-w-0 max-w-full overflow-hidden rounded-3xl rounded-br-sm border border-gray-200/80 dark:border-gray-700/80
+          bg-gray-50 dark:bg-gray-800/80 px-5 py-3 text-[15px]
+          text-gray-800 dark:text-gray-200 leading-relaxed shadow-sm"
       >
-        <MessagePrimitive.Content />
+        <MessagePrimitive.Parts components={{ Text: UserMessageText }} />
       </div>
 
       {/* 操作栏（hover 显示） */}
@@ -290,6 +329,99 @@ const UserMessage: FC = () => (
     </div>
   </MessagePrimitive.Root>
 );
+
+const UserEditComposer: FC = () => {
+  const text = useEditComposer((c) => c.text);
+  const isEmpty = useEditComposer((c) => c.isEmpty);
+  const runtime = useMessageRuntime().composer;
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    const pos = el.value.length;
+    el.setSelectionRange(pos, pos);
+  }, []);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+  }, [text]);
+
+  return (
+    <MessagePrimitive.Root className="mb-8 flex justify-end">
+      <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1.5">
+        <MessagePrimitive.If hasAttachments>
+          <div className="mb-1 flex w-full flex-wrap justify-end gap-2">
+            <MessagePrimitive.Attachments
+              components={{
+                File: MessageBubbleFileAttachmentChip,
+                Image: MessageBubbleImageAttachmentChip,
+                Document: MessageBubbleFileAttachmentChip,
+                Attachment: MessageBubbleFileAttachmentChip,
+              }}
+            />
+          </div>
+        </MessagePrimitive.If>
+
+        <div
+          className="w-full min-w-0 max-w-full overflow-hidden rounded-3xl rounded-br-sm border border-blue-200/80 dark:border-blue-700/70
+            bg-white dark:bg-gray-800 px-4 py-3 text-[15px] shadow-sm"
+        >
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(e) => runtime.setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                runtime.cancel();
+                return;
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (!isEmpty) runtime.send();
+              }
+            }}
+            rows={1}
+            className="min-h-[72px] w-full resize-none bg-transparent text-[15px] leading-relaxed
+              text-gray-900 dark:text-gray-100 focus:outline-none"
+          />
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-200/70 pt-3 dark:border-gray-700/70">
+            <span className="text-xs text-gray-400 dark:text-gray-500">
+              Enter 发送，Shift+Enter 换行，Esc 取消
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => runtime.cancel()}
+                className="rounded-lg px-3 py-1.5 text-sm text-gray-500 transition-colors
+                  hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={isEmpty}
+                onClick={() => {
+                  if (!isEmpty) runtime.send();
+                }}
+                className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm text-white transition-colors
+                  hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40
+                  dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100"
+              >
+                重新发送
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </MessagePrimitive.Root>
+  );
+};
 
 const UserActionBar: FC = () => (
   <ActionBarPrimitive.Root
@@ -556,7 +688,10 @@ const ComposerImageAttachmentChip: FC = () => (
 const Composer: FC = () => {
   const [pendingUrls, setPendingUrls] = useState<Array<{ url: string; id: string }>>([]);
   const text = useComposer((c) => c.text);
+  const isEmpty = useComposer((c) => c.isEmpty);
+  const attachmentCount = useComposer((c) => c.attachments.length);
   const runtime = useComposerRuntime();
+  const isRunning = useThread((t) => t.isRunning);
 
   const handleInputChange = useCallback(
     (newValue: string) => {
@@ -588,47 +723,55 @@ const Composer: FC = () => {
     setPendingUrls((prev) => prev.filter((u) => u.id !== id));
   };
 
-  // 发送前拼接 URL
-  const ComposerActionWithUrls: FC = () => (
-    <div className="ml-auto flex items-center gap-1.5">
-      <ComposerPrimitive.Send
-        asChild
-        onClick={() => {
-          // 发送时如果有 pending URL，将其添加到消息头
-          if (pendingUrls.length > 0) {
-            const urlsText = pendingUrls.map((u) => u.url).join("\n");
-            const currentValue = text;
-            const finalMessage = [urlsText, currentValue].filter(Boolean).join("\n\n");
-            runtime.setText(finalMessage);
-            setPendingUrls([]);
-            // 让发送触发
-            setTimeout(() => {
-              document.querySelector('[title="发送 (Enter)"]')?.dispatchEvent(
-                new MouseEvent("click", { bubbles: true })
-              );
-            }, 0);
-          }
-        }}
-      >
+  const canSendNow =
+    !isEmpty || attachmentCount > 0 || pendingUrls.length > 0;
+
+  const handleSend = useCallback(() => {
+    if (pendingUrls.length > 0) {
+      const urlsText = pendingUrls.map((u) => u.url).join("\n");
+      const finalMessage = [urlsText, text].filter(Boolean).join("\n\n");
+      runtime.setText(finalMessage);
+      setPendingUrls([]);
+      window.setTimeout(() => {
+        const s = runtime.getState();
+        if (!s.isEmpty || s.attachments.length > 0) runtime.send();
+      }, 0);
+      return;
+    }
+    const s = runtime.getState();
+    if (!s.isEmpty || s.attachments.length > 0) runtime.send();
+  }, [pendingUrls, runtime, text]);
+
+  const ComposerPrimaryAction: FC = () => (
+    <div className="ml-auto flex items-center">
+      {isRunning ? (
+        <ComposerPrimitive.Cancel asChild>
+          <button
+            type="button"
+            className="flex h-8 w-8 items-center justify-center rounded-xl
+              border-2 border-gray-300 dark:border-gray-600 hover:border-red-400
+              text-gray-500 hover:text-red-500 transition-colors shadow-sm"
+            title="停止生成"
+            aria-label="停止生成"
+          >
+            <SquareIcon className="h-3.5 w-3.5" />
+          </button>
+        </ComposerPrimitive.Cancel>
+      ) : (
         <button
+          type="button"
+          data-composer-send="true"
+          disabled={!canSendNow}
+          onClick={handleSend}
           className="flex h-8 w-8 items-center justify-center rounded-xl
             bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200 text-white dark:text-black transition-colors
             disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
           title="发送 (Enter)"
+          aria-label="发送"
         >
           <ArrowUpIcon className="h-4 w-4" />
         </button>
-      </ComposerPrimitive.Send>
-      <ComposerPrimitive.Cancel asChild>
-        <button
-          className="flex h-8 w-8 items-center justify-center rounded-xl
-            border-2 border-gray-300 dark:border-gray-600 hover:border-red-400
-            text-gray-500 hover:text-red-500 transition-colors"
-          title="停止生成"
-        >
-          <SquareIcon className="h-3.5 w-3.5" />
-        </button>
-      </ComposerPrimitive.Cancel>
+      )}
     </div>
   );
 
@@ -661,19 +804,11 @@ const Composer: FC = () => {
             value={text}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                // 触发发送
-                if (pendingUrls.length > 0) {
-                  const urlsText = pendingUrls.map((u) => u.url).join("\n");
-                  const newValue = [urlsText, text].filter(Boolean).join("\n\n");
-                  runtime.setText(newValue);
-                  setPendingUrls([]);
-                }
-                document.querySelector('[title="发送 (Enter)"]')?.dispatchEvent(
-                  new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
-                );
-              }
+              if (e.key !== "Enter" || e.shiftKey) return;
+              e.preventDefault();
+              if (isRunning) return;
+              if (!canSendNow) return;
+              handleSend();
             }}
             placeholder="给 AI 助手发送消息..."
             className="min-h-[56px] max-h-48 resize-none bg-transparent px-5 py-4
@@ -681,7 +816,7 @@ const Composer: FC = () => {
               placeholder:text-gray-400 dark:placeholder:text-gray-500
               focus:outline-none leading-relaxed rounded-3xl w-full"
           />
-          {/* 回形针在左，发送 / 停止紧贴右侧并排 */}
+          {/* 回形针在左，右侧单一主按钮：空闲为发送，生成中为停止 */}
           <div className="flex items-center px-3 pb-3 gap-1.5">
             <ComposerPrimitive.AddAttachment asChild>
               <button
@@ -693,7 +828,7 @@ const Composer: FC = () => {
                 <PaperclipIcon className="h-4 w-4" />
               </button>
             </ComposerPrimitive.AddAttachment>
-            <ComposerActionWithUrls />
+            <ComposerPrimaryAction />
           </div>
         </ComposerPrimitive.Root>
         <p className="mt-2 text-center text-xs text-gray-300 dark:text-gray-600">

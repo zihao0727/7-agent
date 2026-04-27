@@ -1,12 +1,9 @@
-"""
-/api/mcp —— MCP 服务器的增删查
-"""
-
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
+from backend.auth_dependencies import require_current_user
 from backend.state import get_app_state
 
 router = APIRouter(tags=["mcp"])
@@ -14,26 +11,24 @@ router = APIRouter(tags=["mcp"])
 
 class MCPAddRequest(BaseModel):
     name: str
-    transport: str          # "stdio" | "sse"
-    command: str = ""       # stdio 模式
-    args: list[str] = []
-    url: str = ""           # sse 模式
-    env: dict[str, str] = {}
+    transport: str
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    url: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 @router.get("/mcp")
-async def list_mcp_servers() -> dict:
-    """返回所有 MCP 服务器配置和状态"""
+async def list_mcp_servers(current_user: dict = Depends(require_current_user)) -> dict:
     state = get_app_state()
     return {"servers": state.get_mcp_servers_info()}
 
 
 @router.post("/mcp")
-async def add_mcp_server(body: MCPAddRequest) -> dict:
-    """
-    添加并连接一个 MCP 服务器。
-    成功后将该 server 的工具自动注册到 ToolRegistry。
-    """
+async def add_mcp_server(
+    body: MCPAddRequest,
+    current_user: dict = Depends(require_current_user),
+) -> dict:
     if body.transport == "stdio" and not body.command:
         raise HTTPException(status_code=422, detail="stdio 模式必须提供 command")
     if body.transport == "sse" and not body.url:
@@ -57,8 +52,9 @@ async def add_mcp_server(body: MCPAddRequest) -> dict:
 
 
 @router.delete("/mcp/{server_id}")
-async def remove_mcp_server(server_id: str) -> dict:
-    """移除 MCP 服务器并注销其工具"""
+async def remove_mcp_server(
+    server_id: str, current_user: dict = Depends(require_current_user)
+) -> dict:
     state = get_app_state()
     ok = state.remove_mcp_server(server_id)
     if not ok:

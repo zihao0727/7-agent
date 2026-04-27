@@ -85,10 +85,10 @@ export function MCPPanel() {
     <div className="flex flex-col h-full gap-3">
       {/* 标题栏 */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 uppercase tracking-wide">
+        <div className="flex items-center gap-1.5 text-sm font-medium text-gray-500 uppercase tracking-wide">
           <Server className="h-3.5 w-3.5" />
           MCP 服务器
-          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-xs">
+          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-sm">
             {servers.length}
           </span>
         </div>
@@ -113,14 +113,14 @@ export function MCPPanel() {
       {/* 添加表单 */}
       {showForm && (
         <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-200/35 dark:bg-gray-800 p-3 space-y-2">
-          <p className="text-xs font-semibold text-gray-800 dark:text-gray-200">添加 MCP 服务器</p>
+          <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">添加 MCP 服务器</p>
 
           <input
             type="text"
             placeholder="名称"
             value={form.name}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
+            className="w-full text-sm px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
               bg-white dark:bg-gray-800 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:focus:ring-gray-400"
           />
 
@@ -129,7 +129,7 @@ export function MCPPanel() {
               <button
                 key={t}
                 onClick={() => setForm((f) => ({ ...f, transport: t }))}
-                className={`flex-1 text-xs py-1 rounded border transition-colors
+                className={`flex-1 text-sm py-1 rounded border transition-colors
                   ${form.transport === t
                     ? "bg-black dark:bg-white text-white dark:text-black border-black dark:border-white"
                     : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-600"
@@ -147,7 +147,7 @@ export function MCPPanel() {
                 placeholder="命令（如 python）"
                 value={form.command}
                 onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
-                className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
+                className="w-full text-sm px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
                   bg-white dark:bg-gray-800 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:focus:ring-gray-400"
               />
               <input
@@ -155,7 +155,7 @@ export function MCPPanel() {
                 placeholder="参数（空格分隔，如 server.py --port 8080）"
                 value={form.args}
                 onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))}
-                className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
+                className="w-full text-sm px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
                   bg-white dark:bg-gray-800 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:focus:ring-gray-400"
               />
             </>
@@ -165,25 +165,25 @@ export function MCPPanel() {
               placeholder="SSE URL（如 http://localhost:8080/sse）"
               value={form.url}
               onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-              className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
+              className="w-full text-sm px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
                 bg-white dark:bg-gray-800 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:focus:ring-gray-400"
             />
           )}
 
-          {error && <p className="text-xs text-red-500">{error}</p>}
+          {error && <p className="text-sm text-red-500">{error}</p>}
 
           <div className="flex gap-1.5 pt-0.5">
             <button
               onClick={handleAdd}
               disabled={adding}
-              className="flex-1 text-xs py-1.5 rounded bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200
+              className="flex-1 text-sm py-1.5 rounded bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200
                 disabled:opacity-50 text-white dark:text-black font-medium"
             >
               {adding ? "连接中..." : "连接"}
             </button>
             <button
               onClick={() => { setShowForm(false); setError(null); }}
-              className="flex-1 text-xs py-1.5 rounded border border-gray-200 dark:border-gray-600
+              className="flex-1 text-sm py-1.5 rounded border border-gray-200 dark:border-gray-600
                 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400"
             >
               取消
@@ -192,7 +192,7 @@ export function MCPPanel() {
         </div>
       )}
 
-      {!showForm && error && <p className="text-xs text-red-500 px-1">{error}</p>}
+      {!showForm && error && <p className="text-sm text-red-500 px-1">{error}</p>}
 
       {/* 服务器列表 */}
       {loading && servers.length === 0 ? (
@@ -215,10 +215,10 @@ export function MCPPanel() {
                 <span
                   className={`flex-shrink-0 w-1.5 h-1.5 rounded-full ${STATUS_COLORS[srv.status] ?? "bg-gray-400"}`}
                 />
-                <span className="flex-1 text-xs font-medium text-gray-800 dark:text-gray-200 truncate">
+                <span className="flex-1 text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
                   {srv.name}
                 </span>
-                <span className="text-xs text-gray-400 font-mono">{srv.transport}</span>
+                <span className="text-sm text-gray-400 font-mono">{srv.transport}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); handleRemove(srv.id); }}
                   disabled={removing === srv.id}
@@ -237,7 +237,7 @@ export function MCPPanel() {
 
               {expanded === srv.id && (
                 <div className="px-3 pb-2.5 pt-1 border-t border-gray-200 dark:border-gray-700 space-y-1.5">
-                  <p className="text-xs text-gray-400">
+                  <p className="text-sm text-gray-400">
                     状态：
                     <span className={`font-medium ${
                       srv.status === "connected" ? "text-green-600 dark:text-green-400"
@@ -248,21 +248,21 @@ export function MCPPanel() {
                     </span>
                   </p>
                   {srv.transport === "stdio" && srv.command && (
-                    <p className="text-xs text-gray-400 font-mono truncate">
+                    <p className="text-sm text-gray-400 font-mono truncate">
                       {srv.command} {srv.args.join(" ")}
                     </p>
                   )}
                   {srv.transport === "sse" && srv.url && (
-                    <p className="text-xs text-gray-400 font-mono truncate">{srv.url}</p>
+                    <p className="text-sm text-gray-400 font-mono truncate">{srv.url}</p>
                   )}
                   {srv.tool_names.length > 0 && (
                     <div>
-                      <p className="text-xs text-gray-400 mb-1">工具 ({srv.tool_names.length})</p>
+                      <p className="text-sm text-gray-400 mb-1">工具 ({srv.tool_names.length})</p>
                       <div className="flex flex-wrap gap-1">
                         {srv.tool_names.map((t) => (
                           <span
                             key={t}
-                            className="text-xs bg-gray-200/90 dark:bg-gray-700 text-gray-500 dark:text-gray-400
+                            className="text-sm bg-gray-200/90 dark:bg-gray-700 text-gray-500 dark:text-gray-400
                               px-1.5 py-0.5 rounded font-mono"
                           >
                             {t}
@@ -276,7 +276,7 @@ export function MCPPanel() {
             </li>
           ))}
           {servers.length === 0 && !loading && (
-            <li className="text-xs text-gray-400 text-center py-6">
+            <li className="text-sm text-gray-400 text-center py-6">
               暂无 MCP 服务器，点击 + 添加
             </li>
           )}

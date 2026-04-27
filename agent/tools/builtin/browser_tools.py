@@ -19,14 +19,562 @@ import csv
 import io
 import json
 import logging
+import os
+import re
+import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..base import BaseTool, ToolExecutionError, ToolSchema
 
 logger = logging.getLogger(__name__)
+
+# ── 更接近真实 Chrome 的默认指纹（可被环境变量覆盖）────────────────────────────
+# BROWSER_CHANNEL：留空则用 Playwright 自带 Chromium；可设为 chrome / msedge / chromium
+#   使用本机已安装的浏览器常能显著降低被招标/政务站拦截的概率。
+# BROWSER_USER_AGENT：完整 UA 覆盖（须与下方 CHROME_MAJOR 一致时效果最好）
+# BROWSER_LOCALE / BROWSER_TIMEZONE：语言与时区
+# BROWSER_STEALTH：设为 0/false/no 可关闭反自动化脚本注入（调试用）
+
+_CHROME_MAJOR = "131"
+_DEFAULT_UA = (
+    f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    f"(KHTML, like Gecko) Chrome/{_CHROME_MAJOR}.0.0.0 Safari/537.36"
+)
+
+_STEALTH_INIT_SCRIPT = """
+(() => {
+  const patch = () => {
+    try {
+      if (navigator.webdriver !== undefined) {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      }
+    } catch (e) {}
+    try {
+      if (!window.chrome) {
+        window.chrome = { runtime: {} };
+      }
+    } catch (e) {}
+  };
+  patch();
+  document.addEventListener('DOMContentLoaded', patch);
+})();
+"""
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return v.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _browser_user_agent() -> str:
+    return (os.getenv("BROWSER_USER_AGENT") or _DEFAULT_UA).strip()
+
+
+def _sec_ch_ua_for_major(ua: str) -> str:
+    # 从 UA 中取 Chrome/x.y.z 主版本，失败则用默认主版本
+    m = re.search(r"Chrome/(\d+)", ua)
+    major = m.group(1) if m else _CHROME_MAJOR
+    return (
+        f'"Google Chrome";v="{major}", "Chromium";v="{major}", "Not_A Brand";v="24"'
+    )
+
+
+def _new_context_kwargs() -> dict[str, Any]:
+    ua = _browser_user_agent()
+    return {
+        "viewport": {"width": 1920, "height": 1080},
+        "screen": {"width": 1920, "height": 1080},
+        "ignore_https_errors": _env_bool("BROWSER_IGNORE_HTTPS_ERRORS", True),
+        "user_agent": ua,
+        "locale": os.getenv("BROWSER_LOCALE", "zh-CN"),
+        "timezone_id": os.getenv("BROWSER_TIMEZONE", "Asia/Shanghai"),
+        "color_scheme": "light",
+        "device_scale_factor": 1,
+        "has_touch": False,
+        "is_mobile": False,
+        "extra_http_headers": {
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Sec-CH-UA": _sec_ch_ua_for_major(ua),
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"',
+            "Upgrade-Insecure-Requests": "1",
+        },
+    }
+
+
+def _sync_navigate_and_screenshot(
+    session_id: str,
+    url: str,
+    wait_for: str,
+    timeout: int,
+) -> dict[str, str]:
+    """同步 Playwright 兜底：用于 Windows 某些事件循环不支持 async 子进程场景。"""
+    from playwright.sync_api import sync_playwright
+
+    channel = (os.getenv("BROWSER_CHANNEL") or "").strip() or None
+    headed = _env_bool("BROWSER_HEADED", False)
+    launch_opts: dict[str, Any] = {
+        "headless": not headed,
+        "args": [
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--lang=zh-CN",
+            "--window-size=1920,1080",
+            "--disable-infobars",
+        ],
+    }
+    if channel:
+        launch_opts["channel"] = channel
+
+    fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    dest = _screenshots_dir(session_id) / fname
+
+    with sync_playwright() as pw:
+        browser = None
+        try:
+            try:
+                browser = pw.chromium.launch(**launch_opts)
+            except Exception:
+                if channel:
+                    launch_opts.pop("channel", None)
+                    browser = pw.chromium.launch(**launch_opts)
+                else:
+                    raise
+
+            context = browser.new_context(**_new_context_kwargs())
+            if _env_bool("BROWSER_STEALTH", True):
+                context.add_init_script(_STEALTH_INIT_SCRIPT)
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until=wait_for, timeout=timeout)
+                wait_used = wait_for
+            except Exception:
+                if wait_for != "load":
+                    raise
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                wait_used = "domcontentloaded"
+
+            title = page.title()
+            actual_url = page.url
+            page.screenshot(path=str(dest))
+            context.close()
+            return {
+                "url": actual_url,
+                "title": title,
+                "screenshot_url": f"/api/browser/screenshot/{session_id}/{fname}",
+                "wait_for_used": wait_used,
+            }
+        finally:
+            if browser is not None:
+                browser.close()
+
+
+def _sync_screenshot_from_url(
+    session_id: str,
+    url: str,
+    full_page: bool = False,
+    selector: str | None = None,
+) -> str:
+    """同步 Playwright 截图兜底：基于 URL 重新打开页面并截图。"""
+    from playwright.sync_api import sync_playwright
+
+    channel = (os.getenv("BROWSER_CHANNEL") or "").strip() or None
+    headed = _env_bool("BROWSER_HEADED", False)
+    launch_opts: dict[str, Any] = {
+        "headless": not headed,
+        "args": [
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--lang=zh-CN",
+            "--window-size=1920,1080",
+            "--disable-infobars",
+        ],
+    }
+    if channel:
+        launch_opts["channel"] = channel
+
+    fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    dest = _screenshots_dir(session_id) / fname
+
+    with sync_playwright() as pw:
+        browser = None
+        try:
+            try:
+                browser = pw.chromium.launch(**launch_opts)
+            except Exception:
+                if channel:
+                    launch_opts.pop("channel", None)
+                    browser = pw.chromium.launch(**launch_opts)
+                else:
+                    raise
+
+            context = browser.new_context(**_new_context_kwargs())
+            if _env_bool("BROWSER_STEALTH", True):
+                context.add_init_script(_STEALTH_INIT_SCRIPT)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            if selector:
+                el = page.query_selector(selector)
+                if el:
+                    el.screenshot(path=str(dest))
+                else:
+                    page.screenshot(path=str(dest), full_page=full_page)
+            else:
+                page.screenshot(path=str(dest), full_page=full_page)
+
+            context.close()
+            return f"/api/browser/screenshot/{session_id}/{fname}"
+        finally:
+            if browser is not None:
+                browser.close()
+
+
+def _supports_async_playwright_subprocess() -> bool:
+    """判断当前事件循环是否支持 Playwright async 所需的子进程能力。"""
+    if sys.platform != "win32":
+        return True
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    # Windows 下只有 Proactor 事件循环支持 asyncio 子进程。
+    return "proactor" in loop.__class__.__name__.lower()
+
+
+def _new_screenshot_target(session_id: str) -> tuple[Path, str]:
+    fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    dest = _screenshots_dir(session_id) / fname
+    return dest, f"/api/browser/screenshot/{session_id}/{fname}"
+
+
+def _sync_run_on_page(
+    url: str,
+    worker: Callable[[Any], dict[str, Any]],
+) -> dict[str, Any]:
+    """同步 Playwright 通用执行器：打开页面后执行 worker。"""
+    from playwright.sync_api import sync_playwright
+
+    channel = (os.getenv("BROWSER_CHANNEL") or "").strip() or None
+    headed = _env_bool("BROWSER_HEADED", False)
+    launch_opts: dict[str, Any] = {
+        "headless": not headed,
+        "args": [
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--lang=zh-CN",
+            "--window-size=1920,1080",
+            "--disable-infobars",
+        ],
+    }
+    if channel:
+        launch_opts["channel"] = channel
+
+    with sync_playwright() as pw:
+        browser = None
+        try:
+            try:
+                browser = pw.chromium.launch(**launch_opts)
+            except Exception:
+                if channel:
+                    launch_opts.pop("channel", None)
+                    browser = pw.chromium.launch(**launch_opts)
+                else:
+                    raise
+
+            context = browser.new_context(**_new_context_kwargs())
+            if _env_bool("BROWSER_STEALTH", True):
+                context.add_init_script(_STEALTH_INIT_SCRIPT)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            result = worker(page)
+            context.close()
+            return result
+        finally:
+            if browser is not None:
+                browser.close()
+
+
+def _sync_extract_text(
+    session_id: str,
+    url: str,
+    selector: str | None,
+    include_title: bool,
+    max_length: int,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        out: dict[str, Any] = {"url": page.url}
+        if include_title:
+            out["title"] = page.title()
+        if selector:
+            elements = page.query_selector_all(selector)
+            texts = []
+            for el in elements[:100]:
+                t = el.inner_text()
+                if t.strip():
+                    texts.append(t.strip())
+            out["selector"] = selector
+            out["element_count"] = len(elements)
+            out["text"] = "\n---\n".join(texts)
+        else:
+            body = page.query_selector("body")
+            full_text = body.inner_text() if body else ""
+            out["text"] = full_text[:max_length]
+            out["truncated"] = len(full_text) > max_length
+
+        dest, shot_url = _new_screenshot_target(session_id)
+        page.screenshot(path=str(dest))
+        out["screenshot_url"] = shot_url
+        return out
+
+    return _sync_run_on_page(url, worker)
+
+
+def _sync_extract_attrs(
+    url: str,
+    selector: str,
+    attrs: list[str],
+    max_items: int,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        elements = page.query_selector_all(selector)
+        items: list[dict[str, str]] = []
+        for el in elements[:max_items]:
+            item: dict[str, str] = {}
+            try:
+                text = el.inner_text()
+                if text.strip():
+                    item["text"] = text.strip()[:300]
+            except Exception:
+                pass
+            for attr in attrs:
+                try:
+                    val = el.get_attribute(attr)
+                    if val is not None:
+                        item[attr] = val
+                except Exception:
+                    pass
+            if item:
+                items.append(item)
+        return {
+            "success": True,
+            "url": page.url,
+            "selector": selector,
+            "attrs": attrs,
+            "total_elements": len(elements),
+            "items": items,
+        }
+
+    return _sync_run_on_page(url, worker)
+
+
+def _sync_extract_table(
+    url: str,
+    selector: str,
+    table_index: int,
+    output_format: str,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        tables = page.query_selector_all(selector)
+        if not tables:
+            return {"success": False, "error": "页面上未找到表格", "url": page.url}
+        idx = min(table_index, len(tables) - 1)
+        table = tables[idx]
+        headers = [(th.inner_text()).strip() for th in table.query_selector_all("th")]
+        rows_data: list[list[str]] = []
+        for tr in table.query_selector_all("tr"):
+            cells = tr.query_selector_all("td")
+            if cells:
+                rows_data.append([(td.inner_text()).strip() for td in cells])
+        col_names = headers if headers else [f"col_{i}" for i in range(len(rows_data[0]) if rows_data else 0)]
+        structured = [
+            {(col_names[i] if i < len(col_names) else f"col_{i}"): cell for i, cell in enumerate(row)}
+            for row in rows_data
+        ]
+        if output_format == "csv":
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=col_names or [f"col_{i}" for i in range(len(rows_data[0]) if rows_data else 0)])
+            writer.writeheader()
+            writer.writerows(structured)
+            return {
+                "success": True,
+                "url": page.url,
+                "table_index": idx,
+                "total_tables": len(tables),
+                "row_count": len(rows_data),
+                "csv": buf.getvalue(),
+            }
+        return {
+            "success": True,
+            "url": page.url,
+            "table_index": idx,
+            "total_tables": len(tables),
+            "headers": headers,
+            "row_count": len(rows_data),
+            "data": structured,
+        }
+
+    return _sync_run_on_page(url, worker)
+
+
+def _sync_scroll(
+    session_id: str,
+    url: str,
+    direction: str,
+    amount: int,
+    wait_ms: int,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        if direction == "bottom":
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        elif direction == "top":
+            page.evaluate("window.scrollTo(0, 0)")
+        elif direction == "down":
+            page.evaluate(f"window.scrollBy(0, {amount})")
+        elif direction == "up":
+            page.evaluate(f"window.scrollBy(0, -{amount})")
+        if wait_ms > 0:
+            page.wait_for_timeout(wait_ms)
+        dest, shot_url = _new_screenshot_target(session_id)
+        page.screenshot(path=str(dest))
+        return {
+            "success": True,
+            "direction": direction,
+            "scroll_y": page.evaluate("window.scrollY"),
+            "page_height": page.evaluate("document.body.scrollHeight"),
+            "screenshot_url": shot_url,
+            "url": page.url,
+            "title": page.title(),
+        }
+
+    return _sync_run_on_page(url, worker)
+
+
+def _sync_click(
+    session_id: str,
+    url: str,
+    selector: str | None,
+    text: str | None,
+    wait_for_navigation: bool,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        prev_url = page.url
+        if selector:
+            if wait_for_navigation:
+                try:
+                    with page.expect_navigation(wait_until="load", timeout=15000):
+                        page.click(selector, timeout=10000)
+                except Exception:
+                    pass
+            else:
+                page.click(selector, timeout=10000)
+                page.wait_for_timeout(500)
+        else:
+            if wait_for_navigation:
+                try:
+                    with page.expect_navigation(wait_until="load", timeout=15000):
+                        page.get_by_text(text, exact=False).first.click()
+                except Exception:
+                    pass
+            else:
+                page.get_by_text(text, exact=False).first.click()
+                page.wait_for_timeout(500)
+        dest, shot_url = _new_screenshot_target(session_id)
+        page.screenshot(path=str(dest))
+        return {
+            "success": True,
+            "prev_url": prev_url,
+            "url": page.url,
+            "title": page.title(),
+            "navigated": page.url != prev_url,
+            "screenshot_url": shot_url,
+        }
+
+    return _sync_run_on_page(url, worker)
+
+
+def _sync_extract_list(
+    session_id: str,
+    url: str,
+    item_selector: str,
+    fields: dict | None,
+    max_pages: int,
+    next_button_selector: str | None,
+    infinite_scroll: bool,
+    scroll_rounds: int,
+) -> dict[str, Any]:
+    def worker(page: Any) -> dict[str, Any]:
+        all_items: list[dict] = []
+        pages_scraped = 0
+
+        def extract_current_page() -> list[dict]:
+            elements = page.query_selector_all(item_selector)
+            page_items: list[dict] = []
+            for el in elements:
+                item: dict[str, str] = {}
+                if fields:
+                    for fname, fsel in fields.items():
+                        try:
+                            child = el.query_selector(fsel)
+                            if child:
+                                item[fname] = (child.inner_text()).strip()
+                        except Exception:
+                            pass
+                else:
+                    item["text"] = (el.inner_text()).strip()[:500]
+                if item:
+                    page_items.append(item)
+            return page_items
+
+        if infinite_scroll:
+            seen = 0
+            for rnd in range(scroll_rounds):
+                items = extract_current_page()
+                all_items.extend(items[seen:])
+                seen = len(items)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(2000)
+                new_count = len(page.query_selector_all(item_selector))
+                if new_count <= seen:
+                    break
+                pages_scraped = rnd + 1
+        else:
+            for page_num in range(max_pages):
+                all_items.extend(extract_current_page())
+                pages_scraped = page_num + 1
+                if not next_button_selector:
+                    break
+                btn = page.query_selector(next_button_selector)
+                if not btn:
+                    break
+                if btn.get_attribute("disabled"):
+                    break
+                try:
+                    with page.expect_navigation(timeout=15000):
+                        btn.click()
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    break
+
+        dest, shot_url = _new_screenshot_target(session_id)
+        page.screenshot(path=str(dest))
+        return {
+            "success": True,
+            "url": page.url,
+            "pages_scraped": pages_scraped,
+            "total_items": len(all_items),
+            "items": all_items,
+            "screenshot_url": shot_url,
+            "title": page.title(),
+        }
+
+    return _sync_run_on_page(url, worker)
 
 
 # ── 截图存储目录 ──────────────────────────────────────────────────────────────
@@ -87,13 +635,33 @@ class BrowserSessionManager:
             self._pw = await async_playwright().start()
 
         if self._browser is None or not self._browser.is_connected():
-            self._browser = await self._pw.chromium.launch(
-                headless=True,
-                args=[
+            channel = (os.getenv("BROWSER_CHANNEL") or "").strip() or None
+            headed = _env_bool("BROWSER_HEADED", False)
+            launch_opts: dict[str, Any] = {
+                "headless": not headed,
+                "args": [
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    "--lang=zh-CN",
+                    "--window-size=1920,1080",
+                    "--disable-infobars",
                 ],
-            )
+            }
+            if channel:
+                launch_opts["channel"] = channel
+            try:
+                self._browser = await self._pw.chromium.launch(**launch_opts)
+            except Exception as exc:
+                if channel:
+                    logger.warning(
+                        "使用 BROWSER_CHANNEL=%s 启动失败，回退内置 Chromium: %s",
+                        channel,
+                        exc,
+                    )
+                    launch_opts.pop("channel", None)
+                    self._browser = await self._pw.chromium.launch(**launch_opts)
+                else:
+                    raise
         return self._browser
 
     async def get_page(self, session_id: str) -> Any:
@@ -108,14 +676,9 @@ class BrowserSessionManager:
             browser = await self._ensure_browser()
 
             if session._context is None:
-                session._context = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                )
+                session._context = await browser.new_context(**_new_context_kwargs())
+                if _env_bool("BROWSER_STEALTH", True):
+                    await session._context.add_init_script(_STEALTH_INIT_SCRIPT)
                 session._page = None
 
             if session._page is None or session._page.is_closed():
@@ -173,6 +736,10 @@ class BrowserSessionManager:
         except Exception:
             pass
         logger.info("会话 %s 的浏览器已关闭", session_id)
+
+    async def reset_session(self, session_id: str) -> None:
+        """重置会话：关闭并清理后等待下一次惰性重建。"""
+        await self.close_session(session_id)
 
     async def cleanup_idle_sessions(self) -> int:
         """清理超时未活跃的会话，返回清理数量。"""
@@ -248,6 +815,14 @@ class BrowserNavigateTool(BaseTool):
                         "type": "integer",
                         "description": "超时毫秒数，默认 30000",
                     },
+                    "retry_count": {
+                        "type": "integer",
+                        "description": "失败重试次数（不含首次），默认 2",
+                    },
+                    "retry_delay_ms": {
+                        "type": "integer",
+                        "description": "重试间隔毫秒，默认 1200",
+                    },
                 },
                 "required": ["url"],
             },
@@ -258,30 +833,124 @@ class BrowserNavigateTool(BaseTool):
         url: str,
         wait_for: str = "load",
         timeout: int = 30000,
+        retry_count: int = 2,
+        retry_delay_ms: int = 1200,
         session_id: str = "default",
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        try:
-            page = await mgr.get_page(session_id)
-            await page.goto(url, wait_until=wait_for, timeout=timeout)
-            title = await page.title()
-            actual_url = page.url
-            session = mgr.get_or_create_session(session_id)
-            session.current_url = actual_url
-            session.page_title = title
-            screenshot_url = await mgr.take_screenshot(session_id)
-            return json.dumps(
-                {
-                    "success": True,
-                    "url": actual_url,
-                    "title": title,
-                    "screenshot_url": screenshot_url,
-                },
-                ensure_ascii=False,
-            )
-        except Exception as exc:
-            raise ToolExecutionError(self.name, f"导航失败: {exc}") from exc
+        attempts = max(1, retry_count + 1)
+        delay_ms = max(0, retry_delay_ms)
+        last_exc: Exception | None = None
+        async_playwright_ok = _supports_async_playwright_subprocess()
+
+        for attempt in range(1, attempts + 1):
+            try:
+                if not async_playwright_ok:
+                    fallback = await asyncio.to_thread(
+                        _sync_navigate_and_screenshot,
+                        session_id,
+                        url,
+                        wait_for,
+                        timeout,
+                    )
+                    session = mgr.get_or_create_session(session_id)
+                    session.current_url = fallback["url"]
+                    session.page_title = fallback["title"]
+                    session.last_screenshot_url = fallback["screenshot_url"]
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "url": fallback["url"],
+                            "title": fallback["title"],
+                            "screenshot_url": fallback["screenshot_url"],
+                            "attempt": attempt,
+                            "attempts": attempts,
+                            "wait_for_used": fallback["wait_for_used"],
+                            "fallback": "sync_playwright_precheck",
+                        },
+                        ensure_ascii=False,
+                    )
+
+                page = await mgr.get_page(session_id)
+                current_wait_for = wait_for
+                try:
+                    await page.goto(url, wait_until=current_wait_for, timeout=timeout)
+                except Exception:
+                    # 某些站点会因长尾资源/反爬导致 load 超时；回退到 DOM 就绪提高成功率。
+                    if current_wait_for != "load":
+                        raise
+                    current_wait_for = "domcontentloaded"
+                    await page.goto(url, wait_until=current_wait_for, timeout=timeout)
+
+                title = await page.title()
+                actual_url = page.url
+                session = mgr.get_or_create_session(session_id)
+                session.current_url = actual_url
+                session.page_title = title
+                screenshot_url = await mgr.take_screenshot(session_id)
+                return json.dumps(
+                    {
+                        "success": True,
+                        "url": actual_url,
+                        "title": title,
+                        "screenshot_url": screenshot_url,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "wait_for_used": current_wait_for,
+                    },
+                    ensure_ascii=False,
+                )
+            except Exception as exc:
+                # Windows 某些运行模式下当前事件循环不支持 asyncio 子进程。
+                # Playwright async 驱动会抛 NotImplementedError；改走 sync 兜底。
+                if isinstance(exc, NotImplementedError):
+                    fallback = await asyncio.to_thread(
+                        _sync_navigate_and_screenshot,
+                        session_id,
+                        url,
+                        wait_for,
+                        timeout,
+                    )
+                    session = mgr.get_or_create_session(session_id)
+                    session.current_url = fallback["url"]
+                    session.page_title = fallback["title"]
+                    session.last_screenshot_url = fallback["screenshot_url"]
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "url": fallback["url"],
+                            "title": fallback["title"],
+                            "screenshot_url": fallback["screenshot_url"],
+                            "attempt": attempt,
+                            "attempts": attempts,
+                            "wait_for_used": fallback["wait_for_used"],
+                            "fallback": "sync_playwright",
+                        },
+                        ensure_ascii=False,
+                    )
+                last_exc = exc
+                # 导航失败后重置会话，避免坏掉的 Page/Context 污染后续重试。
+                try:
+                    await mgr.reset_session(session_id)
+                except Exception:
+                    pass
+                if attempt < attempts and delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
+
+        exc = last_exc or RuntimeError("未知导航错误")
+        err_name = type(exc).__name__
+        err_text = str(exc) or repr(exc)
+        hint = ""
+        lower = err_text.lower()
+        if "cert" in lower or "ssl" in lower or "https" in lower:
+            hint = "；建议检查证书，或保持 BROWSER_IGNORE_HTTPS_ERRORS=true"
+        elif "timeout" in lower:
+            hint = "；建议提高 timeout，或使用 wait_for=domcontentloaded"
+        raise ToolExecutionError(
+            self.name,
+            f"导航失败({err_name})，已重试 {attempts} 次: {err_text}{hint}",
+        ) from exc
 
 
 # ── 工具 2：browser_screenshot ────────────────────────────────────────────────
@@ -321,7 +990,17 @@ class BrowserScreenshotTool(BaseTool):
         session = mgr.get_session(session_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面，请先使用 browser_navigate")
-        screenshot_url = await mgr.take_screenshot(session_id, selector=selector, full_page=full_page)
+        if not _supports_async_playwright_subprocess():
+            screenshot_url = await asyncio.to_thread(
+                _sync_screenshot_from_url,
+                session_id,
+                session.current_url,
+                full_page,
+                selector,
+            )
+            session.last_screenshot_url = screenshot_url
+        else:
+            screenshot_url = await mgr.take_screenshot(session_id, selector=selector, full_page=full_page)
         if not screenshot_url:
             raise ToolExecutionError(self.name, "截图失败")
         return json.dumps(
@@ -378,6 +1057,22 @@ class BrowserExtractTextTool(BaseTool):
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_extract_text,
+                    session_id,
+                    session.current_url,
+                    selector,
+                    include_title,
+                    max_length,
+                )
+                session.current_url = out.get("url", session.current_url)
+                if include_title and isinstance(out.get("title"), str):
+                    session.page_title = out["title"]
+                if isinstance(out.get("screenshot_url"), str):
+                    session.last_screenshot_url = out["screenshot_url"]
+                return json.dumps(out, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             out: dict[str, Any] = {"url": page.url}
             if include_title:
@@ -453,6 +1148,16 @@ class BrowserExtractAttrsTool(BaseTool):
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         target_attrs = attrs or ["href", "src"]
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_extract_attrs,
+                    session.current_url,
+                    selector,
+                    target_attrs,
+                    max_items,
+                )
+                return json.dumps(out, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             elements = await page.query_selector_all(selector)
             items: list[dict[str, str]] = []
@@ -532,6 +1237,16 @@ class BrowserExtractTableTool(BaseTool):
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_extract_table,
+                    session.current_url,
+                    selector,
+                    table_index,
+                    output_format,
+                )
+                return json.dumps(out, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             tables = await page.query_selector_all(selector)
             if not tables:
@@ -635,6 +1350,22 @@ class BrowserScrollTool(BaseTool):
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_scroll,
+                    session_id,
+                    session.current_url,
+                    direction,
+                    amount,
+                    wait_ms,
+                )
+                session.current_url = out.get("url", session.current_url)
+                if isinstance(out.get("title"), str):
+                    session.page_title = out["title"]
+                if isinstance(out.get("screenshot_url"), str):
+                    session.last_screenshot_url = out["screenshot_url"]
+                return json.dumps({k: v for k, v in out.items() if k != "title"}, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             if direction == "bottom":
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -712,6 +1443,22 @@ class BrowserClickTool(BaseTool):
         if not selector and not text:
             raise ToolExecutionError(self.name, "selector 和 text 至少需提供一个")
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_click,
+                    session_id,
+                    session.current_url,
+                    selector,
+                    text,
+                    wait_for_navigation,
+                )
+                session.current_url = out.get("url", session.current_url)
+                if isinstance(out.get("title"), str):
+                    session.page_title = out["title"]
+                if isinstance(out.get("screenshot_url"), str):
+                    session.last_screenshot_url = out["screenshot_url"]
+                return json.dumps(out, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             prev_url = page.url
 
@@ -813,6 +1560,25 @@ class BrowserExtractListTool(BaseTool):
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
+            if not _supports_async_playwright_subprocess():
+                out = await asyncio.to_thread(
+                    _sync_extract_list,
+                    session_id,
+                    session.current_url,
+                    item_selector,
+                    fields,
+                    max_pages,
+                    next_button_selector,
+                    infinite_scroll,
+                    scroll_rounds,
+                )
+                session.current_url = out.get("url", session.current_url)
+                if isinstance(out.get("title"), str):
+                    session.page_title = out["title"]
+                if isinstance(out.get("screenshot_url"), str):
+                    session.last_screenshot_url = out["screenshot_url"]
+                return json.dumps({k: v for k, v in out.items() if k != "title"}, ensure_ascii=False)
+
             page = await mgr.get_page(session_id)
             all_items: list[dict] = []
             pages_scraped = 0

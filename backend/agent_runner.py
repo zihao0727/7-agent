@@ -25,6 +25,7 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 
 from backend.config import get_settings
+from backend.model_routing import is_kimi_route
 from backend.state import AppState
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 def _text(chunk: str) -> str:
     return f"0:{json.dumps(chunk, ensure_ascii=False)}\n"
+
+def _reasoning(chunk: str) -> str:
+    return f"g:{json.dumps(chunk, ensure_ascii=False)}\n"
 
 def _tool_call(call: dict) -> str:
     return f"9:{json.dumps(call, ensure_ascii=False)}\n"
@@ -51,12 +55,31 @@ def _done(finish_reason: str = "stop", usage: dict | None = None) -> str:
     return f"d:{json.dumps(payload, ensure_ascii=False)}\n"
 
 
+def _extract_reasoning_delta(delta: Any) -> str:
+    """
+    兼容不同 SDK/网关的推理字段命名，提取本次 chunk 的 reasoning 文本增量。
+    常见字段：reasoning_content / reasoning。
+    """
+    if delta is None:
+        return ""
+
+    val = getattr(delta, "reasoning_content", None)
+    if isinstance(val, str) and val:
+        return val
+
+    val = getattr(delta, "reasoning", None)
+    if isinstance(val, str) and val:
+        return val
+
+    return ""
+
+
 # ── 客户端工厂 ────────────────────────────────────────────────────
 
-def _make_client(model: str = "deepseek-chat") -> AsyncOpenAI:
+def _make_client(model: str = "deepseek-v4-flash") -> AsyncOpenAI:
     s = get_settings()
 
-    if model == "kimi-k2.5":
+    if is_kimi_route(model):
         logger.info(f"使用 Kimi 模型: base_url={s.kimi_base_url}, model={s.kimi_model}")
         return AsyncOpenAI(
             api_key=s.kimi_api_key,
@@ -83,13 +106,20 @@ BROWSER_TOOL_NAMES = frozenset({
     "browser_extract_list",
 })
 
+# 需要自动注入 session_id 的工具集合（浏览器 + 代码执行）
+SESSION_INJECTED_TOOL_NAMES = BROWSER_TOOL_NAMES | frozenset({"run_code"})
+USER_INJECTED_TOOL_NAMES = frozenset({"lark_cli"})
+AUTO_STOP_TOOLS = frozenset({"text_to_image"})
+
 
 async def run_agent_streaming(
     messages: list[dict],
     state: AppState,
     system_prompt: str | None = None,
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
     session_id: str = "default",
+    memory_context: str | None = None,
+    current_user_id: int | None = None,
 ) -> AsyncIterator[str]:
     """
     执行单步 Agent 操作，逐行 yield SSE 数据流字符串。
@@ -103,6 +133,8 @@ async def run_agent_streaming(
     logger.info("开始单步 Agent，模型: %s，消息数: %d", model, len(messages))
     client = _make_client(model)
     prompt = system_prompt or settings.system_prompt
+    if memory_context:
+        prompt = f"{prompt}\n\n{memory_context}"
 
     full_messages: list[dict] = [{"role": "system", "content": prompt}] + messages
 
@@ -111,7 +143,9 @@ async def run_agent_streaming(
 
     # ── 调用 LLM（流式）──────────────────────────────────────────────
     try:
-        model_name = settings.kimi_model if model == "kimi-k2.5" else settings.deepseek_model
+        model_name = (
+            settings.kimi_model if is_kimi_route(model) else settings.deepseek_model
+        )
         stream = await client.chat.completions.create(
             model=model_name,
             messages=full_messages,
@@ -128,6 +162,7 @@ async def run_agent_streaming(
 
     # ── 逐 chunk 流式收集响应 ─────────────────────────────────────────
     accumulated_text = ""
+    accumulated_reasoning = ""
     accumulated_tool_calls: dict[int, dict] = {}
     finish_reason = "stop"
     total_prompt_tokens = 0
@@ -149,6 +184,12 @@ async def run_agent_streaming(
         if delta.content:
             accumulated_text += delta.content
             yield _text(delta.content)
+
+        # 推理内容 delta（thinking/reasoning）—— 不直接展示给用户，但需用于下一轮回传
+        r_delta = _extract_reasoning_delta(delta)
+        if r_delta:
+            accumulated_reasoning += r_delta
+            yield _reasoning(r_delta)
 
         # 工具调用 delta —— 流式累积，等完整后再处理
         if delta.tool_calls:
@@ -193,9 +234,10 @@ async def run_agent_streaming(
             "toolCallId": tc["id"],
             "toolName": tc["function"]["name"],
             "args": args,
+            **({"reasoning_content": accumulated_reasoning} if accumulated_reasoning else {}),
         })
 
-    # 先发出所有工具调用事件，让前端立即显示"正在调用"状态
+    # 先发出工具调用事件，让前端立即显示"正在调用"状态
     for tc in ai_sdk_calls:
         yield _tool_call(tc)
 
@@ -204,9 +246,11 @@ async def run_agent_streaming(
         tool_name = ai_tc["toolName"]
         # 剥离 _purpose 字段：该字段仅用于前端展示，不传入工具执行
         exec_args = {k: v for k, v in ai_tc["args"].items() if k != "_purpose"}
-        # 浏览器工具自动注入 session_id，实现多会话隔离
-        if tool_name in BROWSER_TOOL_NAMES:
+        # 浏览器工具和代码执行工具自动注入 session_id，实现多会话隔离
+        if tool_name in SESSION_INJECTED_TOOL_NAMES:
             exec_args.setdefault("session_id", session_id)
+        if tool_name in USER_INJECTED_TOOL_NAMES:
+            exec_args.setdefault("current_user_id", current_user_id)
         try:
             result = await state.tool_registry.execute(tool_name, exec_args)
             logger.info("工具 '%s' 执行完成", tool_name)
@@ -219,5 +263,11 @@ async def run_agent_streaming(
                 "isError": True,
             })
 
-    # 以 "tool-calls" 结束本轮，前端 useChat（maxSteps>1）将自动发起下一步请求
+    # 对仅文生图这类“结果已可直接展示”的工具，直接 stop，避免下一轮重复输出同一图片
+    called_tool_names = {tc["toolName"] for tc in ai_sdk_calls}
+    if called_tool_names and called_tool_names.issubset(AUTO_STOP_TOOLS):
+        yield _done("stop", usage)
+        return
+
+    # 默认以 "tool-calls" 结束本轮，前端 useChat（maxSteps>1）将自动发起下一步请求
     yield _done("tool-calls", usage)

@@ -64,10 +64,10 @@ export function SkillsPanel() {
   return (
     <div className="flex flex-col h-full gap-3">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 uppercase tracking-wide">
+        <div className="flex items-center gap-1.5 text-sm font-medium text-gray-500 uppercase tracking-wide">
           <Zap className="h-3.5 w-3.5" />
           技能包
-          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-xs">
+          <span className="ml-1 rounded-full bg-gray-200/90 dark:bg-gray-700 px-1.5 py-0.5 text-sm">
             {skills.filter((s) => s.active).length}/{skills.length}
           </span>
         </div>
@@ -87,7 +87,7 @@ export function SkillsPanel() {
           value={mdPath}
           onChange={(e) => setMdPath(e.target.value)}
           placeholder="SKILL.md 路径"
-          className="flex-1 text-xs px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
+          className="flex-1 text-sm px-2 py-1.5 rounded border border-gray-200 dark:border-gray-600
             bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
             placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-500 dark:focus:ring-gray-400"
           onKeyDown={(e) => e.key === "Enter" && handleLoadMd()}
@@ -96,14 +96,14 @@ export function SkillsPanel() {
           onClick={handleLoadMd}
           disabled={loadingMd || !mdPath.trim()}
           className="px-2 py-1.5 rounded bg-black hover:bg-gray-800 dark:bg-white dark:hover:bg-gray-200 disabled:opacity-50
-            text-white dark:text-black text-xs flex items-center gap-1 whitespace-nowrap"
+            text-white dark:text-black text-sm flex items-center gap-1 whitespace-nowrap"
         >
           <Upload className="h-3 w-3" />
           加载
         </button>
       </div>
 
-      {error && <p className="text-xs text-red-500 px-1">{error}</p>}
+      {error && <p className="text-sm text-red-500 px-1">{error}</p>}
 
       {loading && skills.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
@@ -117,7 +117,7 @@ export function SkillsPanel() {
               className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-200/30 dark:bg-gray-800/50 p-2.5 space-y-1.5"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className={`text-xs font-semibold
+                <span className={`text-sm font-semibold
                   ${skill.active ? "text-gray-900 dark:text-gray-100" : "text-gray-700 dark:text-gray-300"}`}>
                   {skill.name}
                 </span>
@@ -135,14 +135,14 @@ export function SkillsPanel() {
                 </button>
               </div>
               {skill.description && (
-                <p className="text-xs text-gray-400 leading-relaxed">{skill.description}</p>
+                <p className="text-sm text-gray-400 leading-relaxed">{skill.description}</p>
               )}
               {skill.tools.length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {skill.tools.map((t) => (
                     <span
                       key={t}
-                      className="text-xs bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400
+                      className="text-sm bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400
                         px-1.5 py-0.5 rounded font-mono"
                     >
                       {t}
@@ -153,7 +153,7 @@ export function SkillsPanel() {
             </li>
           ))}
           {skills.length === 0 && !loading && (
-            <li className="text-xs text-gray-400 text-center py-4">
+            <li className="text-sm text-gray-400 text-center py-4">
               暂无注册技能包，可加载 SKILL.md 添加
             </li>
           )}

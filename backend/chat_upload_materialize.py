@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from backend.model_routing import is_kimi_route
+
 logger = logging.getLogger(__name__)
 
 MAX_BYTES = 32 * 1024 * 1024  # 32 MB
@@ -202,7 +204,7 @@ async def _kimi_extract_file_text(
 
 async def materialize_chat_uploads(
     messages: list[dict[str, Any]],
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
 ) -> list[dict[str, Any]]:
     """
     返回新消息列表：
@@ -214,7 +216,7 @@ async def materialize_chat_uploads(
     """
     out: list[dict[str, Any]] = []
     upload_dir = _upload_dir()
-    use_kimi = model == "kimi-k2.5"
+    use_kimi = is_kimi_route(model)
 
     for msg in messages:
         if msg.get("role") != "user":

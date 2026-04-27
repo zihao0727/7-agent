@@ -35,9 +35,9 @@ OpenAI 格式（发给 DeepSeek / Kimi）：
   ]
 
 图片处理策略：
-  - Kimi (kimi-k2.5): 将 image/* 附件转为 image_url content blocks（vision）
-  - DeepSeek (deepseek-chat): DeepSeek-V3 支持 vision，同样转为 image_url blocks
-  - 若模型不支持 vision，API 会返回错误，前端可提示用户
+  - Kimi：将 image/* 附件转为 image_url content blocks（vision）
+  - DeepSeek（含 deepseek-v4-flash 等）：多模态时同样转为 image_url blocks
+  - 若某模型不支持 vision，API 会返回错误，前端可提示用户
 """
 
 from __future__ import annotations
@@ -48,13 +48,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 支持 vision（image_url）的模型标识
-_VISION_MODELS = {"kimi-k2.5", "deepseek-chat"}
+
+def _supports_vision() -> bool:
+    """本应用仅接 Kimi / DeepSeek；二者当前均支持 image_url 多模态。"""
+    return True
 
 
 def ai_sdk_to_openai(
     messages: list[dict[str, Any]],
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
 ) -> list[dict[str, Any]]:
     """
     将 Vercel AI SDK 格式的 messages 列表转为 OpenAI / DeepSeek / Kimi 格式。
@@ -65,7 +67,7 @@ def ai_sdk_to_openai(
       - role: "data" 等无关消息跳过
     """
     result: list[dict[str, Any]] = []
-    supports_vision = model in _VISION_MODELS
+    supports_vision = _supports_vision()
 
     for msg in messages:
         role = msg.get("role", "")
@@ -90,6 +92,7 @@ def ai_sdk_to_openai(
         elif role == "assistant":
             invocations = msg.get("toolInvocations", [])
             parts = msg.get("parts", [])
+            msg_reasoning = _extract_reasoning_content(msg)
 
             if not invocations and parts:
                 invocations = [
@@ -100,12 +103,15 @@ def ai_sdk_to_openai(
             if invocations:
                 tool_calls = []
                 tool_results = []
+                reasoning_from_invocations = ""
                 for inv in invocations:
                     tc_id = inv.get("toolCallId") or inv.get("toolInvocationId", "")
                     tc_name = inv.get("toolName", "")
                     tc_args = inv.get("args", {})
                     tc_result = inv.get("result", "")
                     state = inv.get("state", "result")
+                    if not reasoning_from_invocations:
+                        reasoning_from_invocations = _extract_reasoning_content(inv)
 
                     tool_calls.append({
                         "id": tc_id,
@@ -122,17 +128,24 @@ def ai_sdk_to_openai(
                             "content": _result_to_str(tc_result),
                         })
 
-                result.append({
+                assistant_row: dict[str, Any] = {
                     "role": "assistant",
                     "content": text_content or None,
                     "tool_calls": tool_calls,
-                })
+                }
+                reasoning = msg_reasoning or reasoning_from_invocations
+                if reasoning:
+                    assistant_row["reasoning_content"] = reasoning
+                result.append(assistant_row)
                 result.extend(tool_results)
             else:
-                result.append({
+                assistant_row: dict[str, Any] = {
                     "role": "assistant",
                     "content": text_content or "",
-                })
+                }
+                if msg_reasoning:
+                    assistant_row["reasoning_content"] = msg_reasoning
+                result.append(assistant_row)
 
         elif role == "tool":
             result.append({
@@ -195,3 +208,25 @@ def _result_to_str(result: Any) -> str:
     if isinstance(result, (dict, list)):
         return json.dumps(result, ensure_ascii=False)
     return str(result) if result is not None else ""
+
+
+def _extract_reasoning_content(obj: Any) -> str:
+    """兼容 top-level 字段和 parts 中的 reasoning 内容。"""
+    if not isinstance(obj, dict):
+        return ""
+    v = obj.get("reasoning_content")
+    if isinstance(v, str) and v.strip():
+        return v
+    v = obj.get("reasoningContent")
+    if isinstance(v, str) and v.strip():
+        return v
+    for part in obj.get("parts") or []:
+        if not isinstance(part, dict) or part.get("type") != "reasoning":
+            continue
+        v = part.get("text")
+        if isinstance(v, str) and v.strip():
+            return v
+        v = part.get("reasoning")
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""

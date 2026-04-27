@@ -10,8 +10,10 @@ from .file_ops import (
     StrReplaceTool,
     WriteFileTool,
 )
+from .run_code_tool import RunCodeTool  # 由 code_runner Skill 注册，非默认内置
 from .web_search import WebSearchTool
 from .time_tool import CurrentTimeTool
+from .lark_cli_tool import LarkCliTool
 
 __all__ = [
     "BashTool",
@@ -20,8 +22,10 @@ __all__ = [
     "StrReplaceTool",
     "ListDirTool",
     "GlobSearchTool",
+    "RunCodeTool",
     "WebSearchTool",
     "CurrentTimeTool",
+    "LarkCliTool",
 ]
 
 
@@ -34,6 +38,6 @@ def get_default_tools() -> list:
         StrReplaceTool(),
         ListDirTool(),
         GlobSearchTool(),
-        WebSearchTool(),  # Tavily 网络搜索
+        WebSearchTool(),
         CurrentTimeTool(),
     ]

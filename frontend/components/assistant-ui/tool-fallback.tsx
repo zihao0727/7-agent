@@ -15,12 +15,17 @@ import {
   XCircleIcon,
   AlertCircleIcon,
   ExternalLinkIcon,
+  Code2Icon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToolPurposeLine } from "@/lib/tool-descriptions-context";
 import { PdfDownloadCard, extractPdfFromToolResult } from "./pdf-preview-handler";
 
 const CONVERT_WORD_TO_PDF_TOOL = "convert_word_to_pdf";
+
+/** 代码执行工具（Code Runner Skill） */
+const RUN_CODE_TOOL = "run_code";
+const TEXT_TO_IMAGE_TOOL = "text_to_image";
 
 /** 浏览器工具名前缀 */
 const BROWSER_TOOL_PREFIX = "browser_";
@@ -54,6 +59,41 @@ function extractBrowserResult(result: unknown): {
     pageUrl: typeof parsed.url === "string" ? parsed.url : "",
     title: typeof parsed.title === "string" ? parsed.title : "",
   };
+}
+
+/** 从 text_to_image 工具结果中提取图片 URL（支持纯文本与 JSON） */
+function extractTextToImageUrls(result: unknown): string[] {
+  if (!result) return [];
+
+  const urls: string[] = [];
+  const pushUrl = (v: unknown) => {
+    if (typeof v !== "string") return;
+    const s = v.trim();
+    if (/^https?:\/\//i.test(s)) urls.push(s);
+  };
+
+  if (typeof result === "object") {
+    const parsed = result as Record<string, unknown>;
+    const arr = parsed.results;
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        if (!item || typeof item !== "object") continue;
+        pushUrl((item as Record<string, unknown>).url);
+      }
+    }
+    return Array.from(new Set(urls));
+  }
+
+  if (typeof result !== "string") return [];
+
+  // 纯文本场景：逐行提取 "1. https://..." 或直接 https://...
+  const lines = result.split(/\r?\n/);
+  for (const line of lines) {
+    const matched = line.match(/https?:\/\/\S+/gi);
+    if (!matched) continue;
+    for (const u of matched) pushUrl(u);
+  }
+  return Array.from(new Set(urls));
 }
 
 type ToolStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
@@ -113,6 +153,13 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status }: ToolFall
     return extractBrowserResult(result);
   }, [toolName, status?.type, result]);
 
+  const runCodeComplete = toolName === RUN_CODE_TOOL && status?.type === "complete";
+  const textToImageUrls = useMemo(() => {
+    if (toolName !== TEXT_TO_IMAGE_TOOL) return [];
+    if (status?.type !== "complete") return [];
+    return extractTextToImageUrls(result);
+  }, [toolName, status?.type, result]);
+
   return (
     <div className="my-3 rounded-xl border border-zinc-200/60 dark:border-zinc-700/60 overflow-hidden text-sm bg-white dark:bg-zinc-800/50 shadow-sm transition-all hover:shadow-md">
       {/* 标题行 */}
@@ -147,6 +194,18 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status }: ToolFall
             title={pdfFromTool.title}
             className="my-0 mt-2"
           />
+        </div>
+      )}
+
+      {/* run_code：提示右侧面板展示完整记录与图表 */}
+      {runCodeComplete && (
+        <div className="border-t border-emerald-200/70 dark:border-emerald-900/50 bg-emerald-50/90 dark:bg-emerald-950/35 px-4 py-2.5">
+          <p className="text-[12px] text-emerald-900 dark:text-emerald-200/95 leading-snug flex items-start gap-2">
+            <Code2Icon className="h-4 w-4 shrink-0 mt-0.5 opacity-90" />
+            <span>
+              代码、终端输出与 matplotlib 图表已同步到右侧「<strong className="font-semibold">代码执行</strong>」面板（按当前会话隔离）。
+            </span>
+          </p>
         </div>
       )}
 
@@ -199,6 +258,31 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status }: ToolFall
               </span>
             </a>
           </div>
+        </div>
+      )}
+
+      {/* 文生图工具：内联图片预览 */}
+      {textToImageUrls.length > 0 && (
+        <div className="border-t border-zinc-100 dark:border-zinc-800 px-4 py-3 space-y-3">
+          {textToImageUrls.map((url, idx) => (
+            <a
+              key={`${url}-${idx}`}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block group"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={url}
+                alt={`文生图结果 ${idx + 1}`}
+                className="w-full h-auto rounded-lg border border-zinc-200 dark:border-zinc-700 shadow-sm group-hover:shadow-md transition-shadow"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
+            </a>
+          ))}
         </div>
       )}
 

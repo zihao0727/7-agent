@@ -15,6 +15,18 @@ import { codeToHtml } from "shiki";
 import { useState, useEffect, memo, useMemo } from "react";
 import { Check, Copy } from "lucide-react";
 
+const API_URL =
+  typeof window !== "undefined"
+    ? (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:6868")
+    : "";
+
+function resolveImageSrc(src?: string): string | undefined {
+  if (!src) return src;
+  if (/^https?:\/\//i.test(src) || src.startsWith("data:")) return src;
+  if (src.startsWith("/api/")) return `${API_URL}${src}`;
+  return src;
+}
+
 function getTheme(): "light" | "dark" {
   if (typeof window === "undefined") return "dark";
   return document.documentElement.classList.contains("dark") ? "dark" : "light";
@@ -154,6 +166,20 @@ const markdownComponents: Components = {
         className="text-gray-700 dark:text-gray-300 underline hover:text-gray-900 dark:hover:text-gray-100"
         target="_blank"
         rel="noopener noreferrer"
+      />
+    );
+  },
+
+  img({ src, alt, ...props }) {
+    const resolved = resolveImageSrc(typeof src === "string" ? src : undefined);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        {...props}
+        src={resolved}
+        alt={typeof alt === "string" ? alt : "image"}
+        className="my-3 max-w-full h-auto rounded border border-gray-200 dark:border-gray-700"
+        loading="lazy"
       />
     );
   },

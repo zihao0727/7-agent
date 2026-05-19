@@ -5,9 +5,9 @@
 .cursor
 .vscode
 .skill-studio-exports
-.data
-.examples
-.test
+data/
+examples/
+test/
 # Python 缓存文件
 __pycache__/
 *.py[cod]

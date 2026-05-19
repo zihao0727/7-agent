@@ -9,6 +9,7 @@ from backend.auth_service import (
     logout_user,
     register_user,
     send_register_email_code,
+    update_user_avatar,
 )
 
 router = APIRouter(tags=["auth"])
@@ -28,6 +29,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
+
+
+class AvatarRequest(BaseModel):
+    avatar_url: str | None = None
 
 
 @router.post("/auth/send-register-code")
@@ -65,6 +70,14 @@ async def login_api(body: LoginRequest, request: Request) -> dict:
 @router.get("/auth/me")
 async def me_api(current_user: dict = Depends(require_current_user)) -> dict:
     return {"user": current_user}
+
+
+@router.patch("/auth/me/avatar")
+async def update_avatar_api(
+    body: AvatarRequest, current_user: dict = Depends(require_current_user)
+) -> dict:
+    user = await update_user_avatar(int(current_user["id"]), body.avatar_url)
+    return {"user": user}
 
 
 @router.post("/auth/logout")

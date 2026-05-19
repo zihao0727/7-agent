@@ -168,6 +168,7 @@ async def register_user(
             "id": int(user_id),
             "email": normalized_email,
             "display_name": clean_name,
+            "avatar_url": None,
         },
     }
 
@@ -186,7 +187,7 @@ async def login_user(
         async with conn.cursor(DictCursor) as cursor:
             await cursor.execute(
                 """
-                SELECT id, email, display_name, password_hash, is_active
+                SELECT id, email, display_name, avatar_url, password_hash, is_active
                 FROM users
                 WHERE email=%s
                 LIMIT 1
@@ -221,6 +222,7 @@ async def login_user(
             "id": int(user["id"]),
             "email": user["email"],
             "display_name": user["display_name"],
+            "avatar_url": user.get("avatar_url"),
         },
     }
 
@@ -239,6 +241,7 @@ async def get_user_by_token(access_token: str) -> dict[str, Any] | None:
                   users.id,
                   users.email,
                   users.display_name,
+                  users.avatar_url,
                   users.is_active,
                   auth_tokens.id AS auth_token_id,
                   auth_tokens.expires_at,
@@ -262,8 +265,40 @@ async def get_user_by_token(access_token: str) -> dict[str, Any] | None:
                 "id": int(row["id"]),
                 "email": row["email"],
                 "display_name": row["display_name"],
+                "avatar_url": row.get("avatar_url"),
                 "auth_token_id": int(row["auth_token_id"]),
             }
+
+
+async def update_user_avatar(user_id: int, avatar_url: str | None) -> dict[str, Any]:
+    clean_avatar = (avatar_url or "").strip() or None
+    if clean_avatar is not None:
+        if not clean_avatar.startswith("data:image/"):
+            raise _bad_request("Avatar must be an image data URL")
+        if len(clean_avatar) > 2_800_000:
+            raise _bad_request("Avatar image is too large")
+
+    async with get_auth_conn() as conn:
+        async with conn.cursor(DictCursor) as cursor:
+            await cursor.execute(
+                "UPDATE users SET avatar_url=%s WHERE id=%s",
+                (clean_avatar, user_id),
+            )
+            await cursor.execute(
+                "SELECT id, email, display_name, avatar_url FROM users WHERE id=%s LIMIT 1",
+                (user_id,),
+            )
+            user = await cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": int(user["id"]),
+        "email": user["email"],
+        "display_name": user["display_name"],
+        "avatar_url": user.get("avatar_url"),
+    }
 
 
 async def logout_user(access_token: str) -> None:

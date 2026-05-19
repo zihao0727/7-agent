@@ -111,6 +111,7 @@ async def initialize_auth_tables() -> None:
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       email VARCHAR(255) NOT NULL,
       display_name VARCHAR(80) NULL,
+      avatar_url MEDIUMTEXT NULL,
       password_hash VARCHAR(255) NOT NULL,
       is_active TINYINT(1) NOT NULL DEFAULT 1,
       email_verified_at DATETIME NULL,
@@ -178,6 +179,11 @@ async def initialize_auth_tables() -> None:
             await cursor.execute(create_codes)
             await cursor.execute(create_tokens)
             await cursor.execute(create_lark_accounts)
+            try:
+                await cursor.execute("ALTER TABLE users ADD COLUMN avatar_url MEDIUMTEXT NULL AFTER display_name")
+            except Exception as exc:
+                if "Duplicate column name" not in str(exc):
+                    raise
 
 
 async def disconnect_auth_db() -> None:

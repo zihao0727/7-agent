@@ -1,6 +1,7 @@
 """
 将 useChat 随消息发送的 experimental_attachments（data URL）落盘/处理：
-- Word (.doc/.docx): 落盘，注入服务器绝对路径，供 convert_word_to_pdf 等工具使用
+- Word (.doc/.docx): 落盘，注入服务器绝对路径，供格式调整/转换等工具使用
+- Excel (.xls/.xlsx): 落盘，注入服务器绝对路径，供数据分析/清洗使用
 - PDF (.pdf):        提取文本内容注入消息（同时落盘备份）；调用 Kimi Files API 时质量更高
 - TXT (text/plain):  直接读取文本内容注入消息
 - 图片 (image/*):   保留在 experimental_attachments 中，由 message_converter 按模型处理（vision）
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.model_routing import is_kimi_route
+from backend.workspace import session_subdir
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +31,19 @@ _WORD_MIME = frozenset(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
 )
+_EXCEL_SUFFIX = frozenset({".xls", ".xlsx"})
+_EXCEL_MIME = frozenset(
+    {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+)
+_DELIMITED_SUFFIX = frozenset({".csv", ".tsv"})
 _IMAGE_MIME_PREFIX = "image/"
 _IMAGE_SUFFIX = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"})
 
 
 # ── 工具函数 ────────────────────────────────────────────────────────────────
-
-def _upload_dir() -> Path:
-    root = Path(__file__).resolve().parent.parent / "data" / "chat_uploads"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
 
 def _parse_data_url(url: str) -> tuple[str, bytes] | None:
     if not url.startswith("data:"):
@@ -64,6 +68,8 @@ def _effective_mime(name: str | None, mime: str | None, content_type: str | None
         suf = Path(name).suffix.lower()
         if suf in _WORD_SUFFIX:
             return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if suf in _EXCEL_SUFFIX:
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         if suf == ".pdf":
             return "application/pdf"
         if suf in {".txt", ".text"}:
@@ -79,6 +85,18 @@ def _is_word(name: str | None, mime: str) -> bool:
     return mime in _WORD_MIME
 
 
+def _is_excel(name: str | None, mime: str) -> bool:
+    if name and Path(name).suffix.lower() in _EXCEL_SUFFIX:
+        return True
+    return mime in _EXCEL_MIME
+
+
+def _is_delimited_table(name: str | None, mime: str) -> bool:
+    if name and Path(name).suffix.lower() in _DELIMITED_SUFFIX:
+        return True
+    return mime in {"text/csv", "text/tab-separated-values"}
+
+
 def _is_pdf(name: str | None, mime: str) -> bool:
     if name and Path(name).suffix.lower() == ".pdf":
         return True
@@ -86,7 +104,7 @@ def _is_pdf(name: str | None, mime: str) -> bool:
 
 
 def _is_txt(name: str | None, mime: str) -> bool:
-    if name and Path(name).suffix.lower() in {".txt", ".text", ".csv", ".md", ".log"}:
+    if name and Path(name).suffix.lower() in {".txt", ".text", ".md", ".log"}:
         return True
     return mime.startswith("text/") and "html" not in mime
 
@@ -103,6 +121,14 @@ def _suffix_for_word(name: str | None, mime: str) -> str:
         if s in _WORD_SUFFIX:
             return s
     return ".docx" if "wordprocessingml" in mime else ".doc"
+
+
+def _suffix_for_excel(name: str | None, mime: str) -> str:
+    if name:
+        s = Path(name).suffix.lower()
+        if s in _EXCEL_SUFFIX:
+            return s
+    return ".xlsx" if "spreadsheetml" in mime else ".xls"
 
 
 # ── PDF 文本提取 ────────────────────────────────────────────────────────────
@@ -205,17 +231,21 @@ async def _kimi_extract_file_text(
 async def materialize_chat_uploads(
     messages: list[dict[str, Any]],
     model: str = "deepseek-v4-flash",
+    *,
+    user_id: int | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     返回新消息列表：
     - Word → 落盘，注入服务器路径
+    - Excel → 落盘，注入服务器路径
     - PDF  → 提取文本注入（Kimi 用 Files API；DeepSeek 用 pypdf 本地提取）
     - TXT  → 读取文本注入
     - 图片 → 保留在 experimental_attachments，message_converter 后续处理 vision
     - 其他 → 保留附件 + 说明注释
     """
     out: list[dict[str, Any]] = []
-    upload_dir = _upload_dir()
+    upload_dir = session_subdir(int(user_id or 0), session_id or "system", "uploads")
     use_kimi = is_kimi_route(model)
 
     for msg in messages:
@@ -257,7 +287,7 @@ async def materialize_chat_uploads(
                     dest.write_bytes(raw)
                     abs_path = str(dest.resolve())
                     additions.append(
-                        f"[已上传 Word 文件，服务器绝对路径（请用 convert_word_to_pdf 的 file_path）]: {abs_path}"
+                        f"[已上传 Word 文件，服务器绝对路径（用于格式调整/内容处理/转换）]: {abs_path}"
                     )
                     logger.info("Word 已落盘: %s (来自: %s)", abs_path, name)
                 except OSError as exc:
@@ -265,14 +295,52 @@ async def materialize_chat_uploads(
                     additions.append(f"[保存 Word 文件失败]: {name or '未命名'} — {exc}")
                 continue
 
+            # ── Excel ───────────────────────────────────────────────────────
+            if _is_excel(name, eff_mime):
+                suf = _suffix_for_excel(name, eff_mime)
+                safe_name = f"{uuid.uuid4().hex}{suf}"
+                dest = upload_dir / safe_name
+                try:
+                    dest.write_bytes(raw)
+                    abs_path = str(dest.resolve())
+                    additions.append(
+                        f"[已上传 Excel 文件，服务器绝对路径（用于数据分析/清洗/生成新表格）]: {abs_path}"
+                    )
+                    logger.info("Excel 已落盘: %s (来自: %s)", abs_path, name)
+                except OSError as exc:
+                    logger.warning("Excel 落盘失败: %s", exc)
+                    additions.append(f"[保存 Excel 文件失败]: {name or '未命名'} — {exc}")
+                continue
+
+            # ── CSV / TSV ───────────────────────────────────────────────────
+            if _is_delimited_table(name, eff_mime):
+                suf = Path(name).suffix.lower() if name and Path(name).suffix.lower() in _DELIMITED_SUFFIX else ".csv"
+                safe_name = f"{uuid.uuid4().hex}{suf}"
+                dest = upload_dir / safe_name
+                try:
+                    dest.write_bytes(raw)
+                    abs_path = str(dest.resolve())
+                    preview = _read_txt_text(raw, name)[:4000]
+                    additions.append(
+                        f"[已上传表格文本文件，服务器绝对路径（用于数据分析/清洗/生成新表格）]: {abs_path}\n"
+                        f"[前 4000 字符预览]\n{preview}"
+                    )
+                    logger.info("Delimited table 已落盘: %s (来自: %s)", abs_path, name)
+                except OSError as exc:
+                    logger.warning("Delimited table 落盘失败: %s", exc)
+                    additions.append(f"[保存表格文本文件失败]: {name or '未命名'} — {exc}")
+                continue
+
             # ── PDF ─────────────────────────────────────────────────────────
             if _is_pdf(name, eff_mime):
                 # 落盘备份
                 safe_name = f"{uuid.uuid4().hex}.pdf"
                 dest = upload_dir / safe_name
+                abs_path = ""
                 try:
                     dest.write_bytes(raw)
-                    logger.info("PDF 已落盘: %s (来自: %s)", dest, name)
+                    abs_path = str(dest.resolve())
+                    logger.info("PDF 已落盘: %s (来自: %s)", abs_path, name)
                 except OSError as exc:
                     logger.warning("PDF 落盘失败: %s", exc)
 
@@ -292,11 +360,13 @@ async def materialize_chat_uploads(
                 if text_content and text_content.strip():
                     label = name or "document.pdf"
                     additions.append(
+                        f"[已上传 PDF 文件，服务器绝对路径（用于 pdf2zh 翻译/文档处理）]: {abs_path}\n"
                         f"[PDF 文件内容 - {label}]\n{text_content.strip()}"
                     )
                 else:
                     additions.append(
-                        f"[PDF 文件已上传，但未能提取到文本内容]: {name or '未命名'}"
+                        f"[PDF 文件已上传，服务器绝对路径（用于 pdf2zh 翻译/文档处理）]: {abs_path}\n"
+                        f"[未能提取到文本内容]: {name or '未命名'}"
                     )
                 continue
 

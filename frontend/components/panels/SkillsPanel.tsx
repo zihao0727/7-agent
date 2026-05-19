@@ -2,8 +2,16 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Zap, RefreshCw, Upload } from "lucide-react";
-import { fetchSkills, activateSkill, deactivateSkill, loadSkillFromMd } from "@/lib/api";
+import {
+  fetchSkills,
+  activateSkill,
+  deactivateSkill,
+  loadSkillFromMd,
+  updateSkillPermissions,
+} from "@/lib/api";
 import type { SkillInfo } from "@/lib/types";
+
+type RiskLevel = NonNullable<SkillInfo["permissions"]>["risk_level"];
 
 export function SkillsPanel() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -58,6 +66,24 @@ export function SkillsPanel() {
       setError(e instanceof Error ? e.message : "加载失败");
     } finally {
       setLoadingMd(false);
+    }
+  };
+
+  const handlePermissionChange = async (
+    skill: SkillInfo,
+    patch: { risk_level?: RiskLevel; requires_confirmation?: boolean }
+  ) => {
+    setBusy(skill.name);
+    setError(null);
+    try {
+      const permissions = await updateSkillPermissions(skill.name, patch);
+      setSkills((prev) =>
+        prev.map((item) => (item.name === skill.name ? { ...item, permissions } : item))
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "保存权限设置失败");
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -150,6 +176,44 @@ export function SkillsPanel() {
                   ))}
                 </div>
               )}
+              {skill.permissions ? (
+                <div className="space-y-2 rounded-md bg-white/60 p-2 text-xs text-gray-500 dark:bg-black/20 dark:text-gray-400">
+                  <div>访问：{skill.permissions.access.join("、")}</div>
+                  <label className="flex items-center justify-between gap-2">
+                    <span>风险等级</span>
+                    <select
+                      value={skill.permissions.risk_level}
+                      disabled={busy === skill.name}
+                      onChange={(e) =>
+                        void handlePermissionChange(skill, {
+                          risk_level: e.target.value as RiskLevel,
+                        })
+                      }
+                      className="h-7 rounded border border-gray-200 bg-white px-2 text-xs text-gray-700 outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                    >
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="unknown">unknown</option>
+                    </select>
+                  </label>
+                  <label className="flex items-center justify-between gap-2">
+                    <span>权限确认</span>
+                    <input
+                      type="checkbox"
+                      checked={skill.permissions.requires_confirmation}
+                      disabled={busy === skill.name}
+                      onChange={(e) =>
+                        void handlePermissionChange(skill, {
+                          requires_confirmation: e.target.checked,
+                        })
+                      }
+                      className="h-4 w-4 rounded border-gray-300 text-gray-900"
+                    />
+                  </label>
+                  <div>确认场景：{skill.permissions.requires_confirmation_for.join("、")}</div>
+                </div>
+              ) : null}
             </li>
           ))}
           {skills.length === 0 && !loading && (

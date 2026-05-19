@@ -14,6 +14,8 @@ import { Components } from "react-markdown";
 import { codeToHtml } from "shiki";
 import { useState, useEffect, memo, useMemo } from "react";
 import { Check, Copy } from "lucide-react";
+import { authorizedFetch } from "@/lib/auth";
+import { buildApiUrl } from "@/lib/api";
 
 const API_URL =
   typeof window !== "undefined"
@@ -25,6 +27,84 @@ function resolveImageSrc(src?: string): string | undefined {
   if (/^https?:\/\//i.test(src) || src.startsWith("data:")) return src;
   if (src.startsWith("/api/")) return `${API_URL}${src}`;
   return src;
+}
+
+function isInternalApiImage(src?: string): boolean {
+  if (!src) return false;
+  return src.startsWith("/api/");
+}
+
+function resolveAuthImageUrl(src?: string): string {
+  if (!src) return "";
+  if (/^https?:\/\//i.test(src)) return src;
+  return buildApiUrl(src);
+}
+
+function AuthImage({ src, alt, className, loading }: { src?: string; alt?: string; className?: string; loading?: string }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let cancelled = false;
+
+    setBlobUrl(null);
+    setFailed(false);
+
+    const load = async () => {
+      try {
+        const response = await authorizedFetch(resolveAuthImageUrl(src), {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`Image request failed: ${response.status}`);
+        }
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) {
+          setBlobUrl(objectUrl);
+        }
+      } catch (error) {
+        console.error("load auth image failed", error);
+        if (!cancelled) {
+          setFailed(true);
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src]);
+
+  if (failed) {
+    return (
+      <div className={`flex items-center justify-center bg-zinc-50 px-4 py-8 text-xs text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400 ${className || ""}`}>
+        图片加载失败
+      </div>
+    );
+  }
+
+  if (!blobUrl) {
+    return (
+      <div className={`flex items-center justify-center bg-zinc-50 px-4 py-8 text-xs text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400 ${className || ""}`}>
+        加载图片中...
+      </div>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={blobUrl}
+      alt={alt || "image"}
+      className={className}
+      loading={loading as "lazy" | "eager" | undefined}
+    />
+  );
 }
 
 function getTheme(): "light" | "dark" {
@@ -171,7 +251,18 @@ const markdownComponents: Components = {
   },
 
   img({ src, alt, ...props }) {
-    const resolved = resolveImageSrc(typeof src === "string" ? src : undefined);
+    const rawSrc = typeof src === "string" ? src : undefined;
+    if (isInternalApiImage(rawSrc)) {
+      return (
+        <AuthImage
+          src={rawSrc}
+          alt={typeof alt === "string" ? alt : "image"}
+          className="my-3 max-w-full h-auto rounded border border-gray-200 dark:border-gray-700"
+          loading="lazy"
+        />
+      );
+    }
+    const resolved = resolveImageSrc(rawSrc);
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img

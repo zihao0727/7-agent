@@ -23,6 +23,7 @@ import {
   useComposer,
   useComposerRuntime,
   useEditComposer,
+  useMessage,
   useMessageRuntime,
   useThread,
 } from "@assistant-ui/react";
@@ -465,35 +466,113 @@ const UserActionBar: FC = () => (
 
 // ── 助手消息 ────────────────────────────────────────────────────────────────
 
-const AssistantAvatar: FC = () => (
+const AssistantAvatar: FC = () => {
+  const isRunning = useMessage((message) => message.status?.type === "running");
+
+  return (
+    <div className="relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center">
+      {isRunning ? (
+        <span
+          className="assistant-avatar-breathe absolute inset-[-4px] rounded-full
+            bg-[radial-gradient(circle,rgba(59,130,246,0.18)_0%,rgba(59,130,246,0.08)_42%,transparent_72%)]
+            dark:bg-[radial-gradient(circle,rgba(96,165,250,0.22)_0%,rgba(96,165,250,0.08)_42%,transparent_72%)]"
+          aria-hidden
+        />
+      ) : null}
+      <div
+        className="relative flex h-8 w-8 overflow-hidden rounded-full ring-1 ring-gray-200 dark:ring-gray-700
+          bg-white dark:bg-gray-900 shadow-sm"
+      >
+        <Image
+          src={logoLight}
+          alt=""
+          width={32}
+          height={32}
+          className="h-full w-full object-cover dark:hidden"
+        />
+        <Image
+          src={logoDark}
+          alt=""
+          width={32}
+          height={32}
+          className="hidden h-full w-full object-cover dark:block"
+        />
+      </div>
+    </div>
+  );
+};
+
+function hasRenderableAssistantContent(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+
+  return content.some((part) => {
+    if (!part || typeof part !== "object") return false;
+    const x = part as Record<string, unknown>;
+    const type = typeof x.type === "string" ? x.type : "";
+    if (type === "text") return typeof x.text === "string" && x.text.trim().length > 0;
+    if (type === "reasoning") {
+      const reasoning =
+        typeof x.reasoning === "string"
+          ? x.reasoning
+          : typeof x.text === "string"
+            ? x.text
+            : "";
+      return reasoning.trim().length > 0;
+    }
+    return (
+      type === "tool-invocation" ||
+      type === "source" ||
+      type === "image" ||
+      type === "file" ||
+      type === "audio"
+    );
+  });
+}
+
+const AssistantPendingShell: FC = () => (
   <div
-    className="relative flex h-8 w-8 shrink-0 mt-0.5 overflow-hidden rounded-full
-      ring-1 ring-gray-200 dark:ring-gray-700 bg-white dark:bg-gray-900 shadow-sm"
+    className={cn(
+      "assistant-wait-pill ml-0.5 inline-flex items-center gap-3 overflow-hidden",
+      "rounded-full border border-gray-200/80 bg-white/75 px-3.5 py-2",
+      "text-[13px] font-medium text-gray-600 shadow-[0_10px_30px_rgba(15,23,42,0.08)] backdrop-blur-xl",
+      "dark:border-white/10 dark:bg-gray-900/72 dark:text-gray-300 dark:shadow-[0_14px_36px_rgba(0,0,0,0.35)]",
+    )}
+    role="status"
+    aria-live="polite"
   >
-    <Image
-      src={logoLight}
-      alt=""
-      width={32}
-      height={32}
-      className="h-full w-full object-cover dark:hidden"
-    />
-    <Image
-      src={logoDark}
-      alt=""
-      width={32}
-      height={32}
-      className="hidden h-full w-full object-cover dark:block"
+    <span className="assistant-wait-orb" aria-hidden>
+      <span className="assistant-wait-core" />
+    </span>
+    <span className="relative z-10 flex items-center gap-1.5 text-gray-600 dark:text-gray-300">
+      <span>{"SevnX \u6b63\u5728\u601d\u8003"}</span>
+      <span className="assistant-thinking-dots inline-flex items-end gap-0.5" aria-hidden>
+        <span />
+        <span />
+        <span />
+      </span>
+    </span>
+    <span
+      className="assistant-thinking-bar absolute bottom-0 left-7 h-px w-24 rounded-full bg-gradient-to-r from-transparent via-sky-400/70 to-transparent dark:via-sky-300/70"
+      aria-hidden
     />
   </div>
 );
 
-const AssistantMessage: FC = () => (
-  <MessagePrimitive.Root className="group mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+const AssistantMessage: FC = () => {
+  const statusType = useMessage((message) => message.status?.type);
+  const isLast = useMessage((message) => message.isLast);
+  const content = useMessage((message) => message.content);
+  const showPendingShell =
+    isLast && statusType === "running" && !hasRenderableAssistantContent(content);
+
+  return (
+    <MessagePrimitive.Root className="group mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
     <div className="flex gap-4 items-start">
       <AssistantAvatar />
 
       {/* 内容区 */}
       <div className="flex-1 min-w-0 space-y-2">
+        {showPendingShell ? <AssistantPendingShell /> : null}
         {/* 消息内容（去除强背景框，模拟文档流） */}
         <div className="px-1 py-1 text-[15px] text-gray-800 dark:text-gray-200 leading-relaxed">
           <MessagePrimitive.Parts
@@ -514,19 +593,15 @@ const AssistantMessage: FC = () => (
         <BranchPicker />
       </div>
     </div>
-  </MessagePrimitive.Root>
-);
+    </MessagePrimitive.Root>
+  );
+};
 
 // 助手文本内容（含打字光标）—— 支持 markdown
 const AssistantText: FC<any> = ({ text }) => {
   // 如果文本为空，显示加载动画
   if (!text) {
-    return (
-      <div className="flex items-center gap-2">
-        <Loader className="h-4 w-4 animate-spin text-gray-500 dark:text-gray-400" />
-        <span className="text-gray-500 dark:text-gray-400">AI 正在思考...</span>
-      </div>
-    );
+    return null;
   }
 
   return (
@@ -535,7 +610,7 @@ const AssistantText: FC<any> = ({ text }) => {
       <ArchiveDownloadHandler text={text} />
       <MarkdownText content={text} />
       <ContentPartPrimitive.InProgress>
-        <span className="ml-1 inline-block h-3 w-3 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse align-middle" />
+        <span className="assistant-inline-cursor ml-1 inline-block h-3 w-3 rounded-full bg-zinc-400 dark:bg-zinc-500 align-middle" />
       </ContentPartPrimitive.InProgress>
     </>
   );

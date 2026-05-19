@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Brain, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
+  confirmMemory,
   createMemory,
   deleteMemory,
   fetchMemories,
@@ -15,6 +16,9 @@ const KIND_LABELS: Record<MemoryKind, string> = {
   preference: "偏好",
   profile: "资料",
   project: "项目",
+  contact: "联系人",
+  format: "格式",
+  taboo: "禁忌",
   instruction: "指令",
   fact: "事实",
 };
@@ -108,6 +112,23 @@ export default function MemoriesPage() {
       setMemories((prev) => prev.filter((memory) => memory.id !== id));
     } catch (e) {
       setError(e instanceof Error ? e.message : "删除记忆失败");
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleConfirm = async (memory: MemoryInfo, approved: boolean) => {
+    setSavingId(memory.id);
+    setError(null);
+    try {
+      const updated = await confirmMemory(memory.id, approved);
+      if (approved) {
+        setMemories((prev) => prev.map((item) => (item.id === memory.id ? updated : item)));
+      } else {
+        setMemories((prev) => prev.filter((item) => item.id !== memory.id));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "确认记忆失败");
     } finally {
       setSavingId(null);
     }
@@ -207,6 +228,7 @@ export default function MemoriesPage() {
                       saving={savingId === memory.id}
                       onSave={handleUpdate}
                       onDelete={handleDelete}
+                      onConfirm={handleConfirm}
                     />
                   ))}
                 </div>
@@ -224,11 +246,13 @@ function MemoryRow({
   saving,
   onSave,
   onDelete,
+  onConfirm,
 }: {
   memory: MemoryInfo;
   saving: boolean;
   onSave: (memory: MemoryInfo, content: string, kind: MemoryKind) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onConfirm: (memory: MemoryInfo, approved: boolean) => Promise<void>;
 }) {
   const [content, setContent] = useState(memory.content);
   const [kind, setKind] = useState<MemoryKind>(memory.kind);
@@ -283,8 +307,30 @@ function MemoryRow({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 px-1 text-xs text-gray-400">
         <span>重要度 {Math.round((memory.importance ?? 0) * 100)}%</span>
         <span>置信度 {Math.round((memory.confidence ?? 0) * 100)}%</span>
+        {memory.status === "pending" ? <span className="text-amber-600">待确认</span> : null}
         <span>更新于 {formatDate(memory.updated_at)}</span>
       </div>
+      {memory.status === "pending" ? (
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => void onConfirm(memory, true)}
+            disabled={saving}
+            className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-white dark:text-gray-900"
+          >
+            确认保存
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConfirm(memory, false)}
+            disabled={saving}
+            className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 disabled:opacity-40 dark:border-white/10 dark:text-gray-300"
+          >
+            丢弃
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
+

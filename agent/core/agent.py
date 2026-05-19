@@ -48,7 +48,7 @@ from ..skills.registry import SkillRegistry
 logger = logging.getLogger(__name__)
 
 # Agent 循环最大迭代次数（防止无限工具调用链）
-DEFAULT_MAX_ITERATIONS = 50
+DEFAULT_MAX_ITERATIONS: int | None = None
 
 
 # ── 事件钩子类型 ────────────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ class Agent:
         tool_registry: ToolRegistry,
         skill_registry: SkillRegistry,
         context: ConversationContext,
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        max_iterations: int | None = DEFAULT_MAX_ITERATIONS,
         on_event: OnEventCallback | None = None,
     ) -> None:
         self.llm = llm
@@ -137,7 +137,7 @@ class Agent:
             "用一两句话概括是否成功，必要时简述关键业务含义或错误原因（如状态码、错误信息），避免冗长原始 JSON。"
         ),
         max_tokens: int = 8192,
-        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        max_iterations: int | None = DEFAULT_MAX_ITERATIONS,
         load_default_tools: bool = True,
         on_event: OnEventCallback | None = None,
     ) -> "Agent":
@@ -169,7 +169,7 @@ class Agent:
           1. 将用户输入加入上下文
           2. 调用 LLM
           3. 若 LLM 请求工具调用 → 执行工具 → 将结果反馈给 LLM → 重复
-          4. 直到 stop_reason == "end_turn" 或达到最大迭代次数
+          4. 直到 stop_reason == "end_turn"
           5. 返回 AgentResult
         """
         start_time = time.monotonic()
@@ -181,8 +181,18 @@ class Agent:
         final_text = ""
         error_msg: str | None = None
 
-        for iteration in range(self.max_iterations):
-            logger.debug("Agent iteration %d/%d", iteration + 1, self.max_iterations)
+        iteration = 0
+        while True:
+            iteration += 1
+            if self.max_iterations is not None and iteration > self.max_iterations:
+                error_msg = f"Agent stopped by configured max_iterations ({self.max_iterations})"
+                logger.warning(error_msg)
+                break
+
+            if self.max_iterations is None:
+                logger.debug("Agent iteration %d", iteration)
+            else:
+                logger.debug("Agent iteration %d/%d", iteration, self.max_iterations)
 
             # ── 调用 LLM ───────────────────────────────────────────────────────
             try:
@@ -227,18 +237,13 @@ class Agent:
             result_msg = Message.tool_results(tool_results)
             self.context.add(result_msg)
 
-        else:
-            # 达到最大迭代次数
-            error_msg = f"Agent 达到最大迭代次数 ({self.max_iterations})"
-            logger.warning(error_msg)
-
         elapsed = time.monotonic() - start_time
         await self._emit(AgentEvent(type="done", data=final_text))
 
         return AgentResult(
             text=final_text,
             tool_calls_made=total_tool_calls,
-            total_iterations=iteration + 1,
+            total_iterations=iteration,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
             elapsed_seconds=elapsed,
@@ -252,7 +257,12 @@ class Agent:
         """
         self.context.add_user(user_input)
 
-        for iteration in range(self.max_iterations):
+        iteration = 0
+        while True:
+            iteration += 1
+            if self.max_iterations is not None and iteration > self.max_iterations:
+                logger.warning("Agent stream_run reached max iterations (%s)", self.max_iterations)
+                break
             # 流式模式：先用 complete 获取结构化响应（含工具调用解析）
             # 若为纯文本轮次，可改用 stream()
             llm_response = await self.llm.complete(

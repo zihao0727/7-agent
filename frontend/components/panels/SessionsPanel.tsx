@@ -14,6 +14,7 @@ import {
   fetchSessions,
   createSession,
   deleteSession,
+  isChatBusy,
   type SessionInfo,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -40,9 +41,10 @@ function formatSessionTime(iso: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-/** 列表可视区最多约展示的行数；单行槽位约 2.75rem（含间距），超出则列表内纵向滚动 */
-const SESSIONS_LIST_MAX_VISIBLE_ROWS = 8;
-const SESSION_ROW_SLOT_REM = 2.9;
+/** 列表可视区最多约展示的行数；超出则列表内纵向滚动 */
+const SESSIONS_LIST_MAX_VISIBLE_ROWS = 5;
+const SESSION_ROW_HEIGHT_REM = 2.375;
+const SESSION_ROW_GAP_REM = 0.125;
 
 export function SessionsPanel({
   onSelectSession,
@@ -51,6 +53,18 @@ export function SessionsPanel({
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [chatBusy, setChatBusyLocal] = useState(false);
+  const [busyTip, setBusyTip] = useState(false);
+
+  // 监听全局 chat busy 状态
+  useEffect(() => {
+    setChatBusyLocal(isChatBusy());
+    const handler = (e: Event) => {
+      setChatBusyLocal((e as CustomEvent).detail as boolean);
+    };
+    window.addEventListener("sevn:chat-busy", handler);
+    return () => window.removeEventListener("sevn:chat-busy", handler);
+  }, []);
 
   const loadSessions = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent === true;
@@ -78,7 +92,17 @@ export function SessionsPanel({
     return () => window.removeEventListener("sevn:sessions-refresh", onRefresh);
   }, [loadSessions]);
 
+  const showBusyTip = useCallback(() => {
+    setBusyTip(true);
+    const timer = window.setTimeout(() => setBusyTip(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const handleCreateSession = async () => {
+    if (chatBusy) {
+      showBusyTip();
+      return;
+    }
     try {
       const result = await createSession("新建会话");
       await loadSessions();
@@ -120,7 +144,7 @@ export function SessionsPanel({
       <button
         type="button"
         onClick={handleCreateSession}
-        disabled={loading}
+        disabled={loading || chatBusy}
         className={cn(
           "group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-all",
           "text-gray-700 dark:text-gray-300",
@@ -176,6 +200,13 @@ export function SessionsPanel({
         </p>
       )}
 
+      {/* AI 忙碌时的提示 */}
+      {busyTip && (
+        <p className="animate-in fade-in slide-in-from-top-1 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">
+          AI 正在回复，请等待完成后再切换
+        </p>
+      )}
+
       {!recentListOpen ? null : loading && sessions.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 py-8">
           <Loader2 className="h-6 w-6 animate-spin text-gray-300 dark:text-gray-600" />
@@ -184,23 +215,34 @@ export function SessionsPanel({
         <div
           className="min-h-0 overflow-y-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           style={{
-            maxHeight: `calc(${SESSIONS_LIST_MAX_VISIBLE_ROWS} * ${SESSION_ROW_SLOT_REM}rem)`,
+            maxHeight: `calc(${SESSIONS_LIST_MAX_VISIBLE_ROWS} * ${SESSION_ROW_HEIGHT_REM}rem + ${
+              SESSIONS_LIST_MAX_VISIBLE_ROWS - 1
+            } * ${SESSION_ROW_GAP_REM}rem)`,
           }}
         >
           <ul className="flex flex-col gap-0.5">
             {sortedSessions.map((session) => {
               const active = currentSessionId === session.id;
+              const disabled = chatBusy && !active;
 
               return (
                 <li key={session.id} className="group/row relative">
                   <button
                     type="button"
-                    onClick={() => onSelectSession(session.id)}
+                    onClick={() => {
+                      if (disabled) {
+                        showBusyTip();
+                        return;
+                      }
+                      onSelectSession(session.id);
+                    }}
                     className={cn(
                       "flex w-full items-center rounded-lg px-3 py-2.5 pr-8 text-left transition-all",
                       active
                         ? "bg-gray-200/80 dark:bg-white/10"
-                        : "hover:bg-gray-200/50 dark:hover:bg-white/5"
+                        : disabled
+                          ? "cursor-not-allowed opacity-50"
+                          : "hover:bg-gray-200/50 dark:hover:bg-white/5"
                     )}
                   >
                     <span className="min-w-0 flex-1">

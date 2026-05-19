@@ -1,0 +1,4 @@
+interface:
+  display_name: "Office File Analyst"
+  short_description: "Analyze, clean, and reformat Excel/CSV and Word files."
+  default_prompt: "Upload an Excel, CSV, or Word file and describe the analysis, cleaning, or formatting changes you want."

@@ -45,6 +45,13 @@ interface CodeResult {
   execution_time: number;
 }
 
+interface CodeResultsResponse {
+  session_id: string;
+  user_id: number;
+  namespace: string;
+  results: CodeResult[];
+}
+
 export interface CodePanelProps {
   open: boolean;
   onClose: () => void;
@@ -56,9 +63,18 @@ export function CodePanel({ open, onClose, sessionId }: CodePanelProps) {
   const [loading, setLoading] = useState(false);
   const [expandedCodes, setExpandedCodes] = useState<Set<string>>(new Set());
   const [expandedImages, setExpandedImages] = useState<Set<string>>(new Set());
+  const [namespace, setNamespace] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setResults([]);
+    setNamespace("");
+    setExpandedCodes(new Set());
+    setExpandedImages(new Set());
+    prevCountRef.current = 0;
+  }, [sessionId]);
 
   const fetchResults = useCallback(
     async (silent = true) => {
@@ -70,8 +86,9 @@ export function CodePanel({ open, onClose, sessionId }: CodePanelProps) {
           { cache: "no-store" }
         );
         if (!response.ok) return;
-        const data = await response.json();
+        const data: CodeResultsResponse = await response.json();
         const newResults: CodeResult[] = data.results ?? [];
+        setNamespace(data.namespace || "");
         setResults(newResults);
         if (newResults.length > prevCountRef.current) {
           const latest = newResults[newResults.length - 1];
@@ -112,6 +129,7 @@ export function CodePanel({ open, onClose, sessionId }: CodePanelProps) {
       throw new Error(`clear code results failed: ${response.status}`);
     }
     setResults([]);
+    setNamespace("");
     prevCountRef.current = 0;
     setExpandedCodes(new Set());
     setExpandedImages(new Set());
@@ -170,6 +188,20 @@ export function CodePanel({ open, onClose, sessionId }: CodePanelProps) {
           <XIcon className="h-4 w-4" />
         </button>
       </div>
+
+      {(namespace || sessionId) && (
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-100/80 bg-white px-4 py-2 dark:border-gray-800/80 dark:bg-[#0d0d12]">
+          <span className="select-none text-[11px] font-medium uppercase text-gray-400 dark:text-gray-500">
+            Namespace
+          </span>
+          <span
+            title={namespace || sessionId}
+            className="min-w-0 flex-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-400"
+          >
+            {namespace || sessionId}
+          </span>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto bg-[#f8f9fa] [scrollbar-width:thin] dark:bg-[#0a0a0f]">
         {loading && results.length === 0 && (

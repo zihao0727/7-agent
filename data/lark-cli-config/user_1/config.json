@@ -1,0 +1,20 @@
+{
+  "apps": [
+    {
+      "name": "sevnx_u1_7",
+      "appId": "cli_a9476316a8795cd1",
+      "appSecret": {
+        "source": "keychain",
+        "id": "appsecret:cli_a9476316a8795cd1"
+      },
+      "brand": "feishu",
+      "lang": "zh",
+      "users": [
+        {
+          "userOpenId": "ou_006d0b870b4c330364c58e2865bdaf89",
+          "userName": "赵子豪"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createSession, notifySessionsListRefresh } from "@/lib/api";
 import { ArrowUp, Paperclip, Sparkles, X, FileText, FileImage, File } from "lucide-react";
@@ -8,12 +8,30 @@ import { ACCEPTED_FILE_TYPES } from "@/lib/chat-attachment-adapter";
 import { detectUrls, separateUrlAndText } from "@/lib/url-parser";
 import { UrlReferenceChip } from "@/components/UrlReferenceChip";
 
-const SUGGESTIONS = [
-  "列出当前目录的文件",
-  "帮我写一个 Python 快速排序",
-  "查看系统信息",
-  "分析这段代码的性能",
+const SUGGESTION_POOL = [
+  "整理这个 Excel 表格并找出异常数据",
+  "把这份 PDF 总结成三点结论",
+  "分析这段代码的性能瓶颈",
+  "帮我写一个 Python 数据清洗脚本",
+  "读取当前目录并说明项目结构",
+  "把会议记录整理成待办清单",
+  "生成一份周报初稿",
+  "检查这个接口返回为什么报错",
+  "把 CSV 数据转换成图表分析",
+  "帮我设计一个自动化任务流程",
+  "提取图片里的关键信息",
+  "对比两个文档的差异",
+  "优化这段提示词",
+  "根据文件内容写一封通知邮件",
+  "查看系统信息并给出建议",
+  "帮我规划今天的工作优先级",
 ];
+
+function pickSuggestions() {
+  return [...SUGGESTION_POOL]
+    .sort(() => Math.random() - 0.5)
+    .slice(0, 4);
+}
 
 interface PendingFile {
   name: string;
@@ -71,8 +89,13 @@ export default function HomePage() {
   const [submitting, setSubmitting] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [pendingUrls, setPendingUrls] = useState<PendingUrl[]>([]);
+  const [suggestions, setSuggestions] = useState(() => SUGGESTION_POOL.slice(0, 4));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setSuggestions(pickSuggestions());
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     const message = input.trim();
@@ -235,7 +258,7 @@ export default function HomePage() {
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder="给 Sevn Agent 发送消息..."
+            placeholder="给 SevnX 发送消息..."
             rows={1}
             autoFocus
             disabled={submitting}
@@ -252,7 +275,7 @@ export default function HomePage() {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={submitting}
-              title="上传文件（支持 Word、PDF、图片、TXT 等）"
+              title="上传文件（支持 Word、Excel、PDF、图片、TXT 等）"
               className="flex h-8 w-8 items-center justify-center rounded-xl text-gray-500
                 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-400 dark:hover:text-gray-200
                 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -288,12 +311,12 @@ export default function HomePage() {
 
         {/* 文件类型提示 */}
         <p className="mt-2 text-center text-xs text-gray-400 dark:text-gray-600">
-          支持上传 Word / PDF / 图片 / TXT 文件
+          支持上传 Word / Excel / PDF / 图片 / TXT 文件
         </p>
 
         {/* 快捷建议 */}
         <div className="mt-3 flex flex-wrap justify-center gap-2">
-          {SUGGESTIONS.map((s) => (
+          {suggestions.map((s) => (
             <button
               key={s}
               onClick={() => handleSuggestion(s)}

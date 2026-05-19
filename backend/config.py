@@ -41,8 +41,11 @@ class Settings(BaseSettings):
     mongodb_url: str = "mongodb://localhost:27017"
     mongodb_db: str = "7_agent"
 
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
     # Agent 循环参数
-    max_iterations: int = 20
+    max_iterations: int | None = None
     max_tokens: int = 4096
 
     # 系统提示（可在运行时覆盖；/chat 请求体 system 可覆盖本默认值）
@@ -101,10 +104,10 @@ class Settings(BaseSettings):
 - 用户消息或工具载荷中可能出现 `<system-reminder>` 等标签：**不要逐字复述给用户**，按其含义调整行为即可。
 
 # 强制：工具参数 `_purpose`（本仓库约定）
-每次工具调用必须在参数中包含 **`_purpose`**：一句简洁**中文**，说明**本次调用目的**与当前用户任务的关系，避免套话（适用于内置工具及需该字段的 MCP 调用）。
+每次工具调用必须在参数中包含 **`_purpose`**：一句简洁说明**本次调用目的**与当前用户任务的关系，避免套话；语言必须跟随用户当前主要语言（用户用中文就写中文，用户用英文就写英文，其他语言同理）。
 示例：
 - `"_purpose": "列出项目根目录以确认仓库顶层结构"`
-- `"_purpose": "通过 MCP 查询用户今日日程以安排回复节奏"`
+- `"_purpose": "Search project files to locate the scheduler API wiring"`
 
 # 上下文压缩下的信息留存
 若某次工具返回了后续轮次仍可能用到的**关键事实**（绝对路径、会话 id、错误码、配置键名），请在面向用户的总结中**显式写出**，避免后续历史被截断后丢失线索。

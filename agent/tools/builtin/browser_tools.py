@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -109,6 +110,7 @@ def _new_context_kwargs() -> dict[str, Any]:
 
 def _sync_navigate_and_screenshot(
     session_id: str,
+    user_id: int | None,
     url: str,
     wait_for: str,
     timeout: int,
@@ -132,7 +134,7 @@ def _sync_navigate_and_screenshot(
         launch_opts["channel"] = channel
 
     fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-    dest = _screenshots_dir(session_id) / fname
+    dest = _screenshots_dir(user_id, session_id) / fname
 
     with sync_playwright() as pw:
         browser = None
@@ -177,6 +179,7 @@ def _sync_navigate_and_screenshot(
 
 def _sync_screenshot_from_url(
     session_id: str,
+    user_id: int | None,
     url: str,
     full_page: bool = False,
     selector: str | None = None,
@@ -200,7 +203,7 @@ def _sync_screenshot_from_url(
         launch_opts["channel"] = channel
 
     fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-    dest = _screenshots_dir(session_id) / fname
+    dest = _screenshots_dir(user_id, session_id) / fname
 
     with sync_playwright() as pw:
         browser = None
@@ -248,9 +251,9 @@ def _supports_async_playwright_subprocess() -> bool:
     return "proactor" in loop.__class__.__name__.lower()
 
 
-def _new_screenshot_target(session_id: str) -> tuple[Path, str]:
+def _new_screenshot_target(session_id: str, user_id: int | None = None) -> tuple[Path, str]:
     fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-    dest = _screenshots_dir(session_id) / fname
+    dest = _screenshots_dir(user_id, session_id) / fname
     return dest, f"/api/browser/screenshot/{session_id}/{fname}"
 
 
@@ -303,6 +306,7 @@ def _sync_run_on_page(
 
 def _sync_extract_text(
     session_id: str,
+    user_id: int | None,
     url: str,
     selector: str | None,
     include_title: bool,
@@ -328,7 +332,7 @@ def _sync_extract_text(
             out["text"] = full_text[:max_length]
             out["truncated"] = len(full_text) > max_length
 
-        dest, shot_url = _new_screenshot_target(session_id)
+        dest, shot_url = _new_screenshot_target(session_id, user_id=user_id)
         page.screenshot(path=str(dest))
         out["screenshot_url"] = shot_url
         return out
@@ -337,6 +341,8 @@ def _sync_extract_text(
 
 
 def _sync_extract_attrs(
+    session_id: str,
+    user_id: int | None,
     url: str,
     selector: str,
     attrs: list[str],
@@ -375,6 +381,8 @@ def _sync_extract_attrs(
 
 
 def _sync_extract_table(
+    session_id: str,
+    user_id: int | None,
     url: str,
     selector: str,
     table_index: int,
@@ -425,6 +433,7 @@ def _sync_extract_table(
 
 def _sync_scroll(
     session_id: str,
+    user_id: int | None,
     url: str,
     direction: str,
     amount: int,
@@ -441,7 +450,7 @@ def _sync_scroll(
             page.evaluate(f"window.scrollBy(0, -{amount})")
         if wait_ms > 0:
             page.wait_for_timeout(wait_ms)
-        dest, shot_url = _new_screenshot_target(session_id)
+        dest, shot_url = _new_screenshot_target(session_id, user_id=user_id)
         page.screenshot(path=str(dest))
         return {
             "success": True,
@@ -458,6 +467,7 @@ def _sync_scroll(
 
 def _sync_click(
     session_id: str,
+    user_id: int | None,
     url: str,
     selector: str | None,
     text: str | None,
@@ -485,7 +495,7 @@ def _sync_click(
             else:
                 page.get_by_text(text, exact=False).first.click()
                 page.wait_for_timeout(500)
-        dest, shot_url = _new_screenshot_target(session_id)
+        dest, shot_url = _new_screenshot_target(session_id, user_id=user_id)
         page.screenshot(path=str(dest))
         return {
             "success": True,
@@ -501,6 +511,7 @@ def _sync_click(
 
 def _sync_extract_list(
     session_id: str,
+    user_id: int | None,
     url: str,
     item_selector: str,
     fields: dict | None,
@@ -562,7 +573,7 @@ def _sync_extract_list(
                 except Exception:
                     break
 
-        dest, shot_url = _new_screenshot_target(session_id)
+        dest, shot_url = _new_screenshot_target(session_id, user_id=user_id)
         page.screenshot(path=str(dest))
         return {
             "success": True,
@@ -579,10 +590,34 @@ def _sync_extract_list(
 
 # ── 截图存储目录 ──────────────────────────────────────────────────────────────
 
-def _screenshots_dir(session_id: str = "default") -> Path:
-    root = Path(__file__).resolve().parent.parent.parent.parent / "data" / "screenshots" / session_id
+def _browser_namespace(user_id: int | None, session_id: str) -> str:
+    user_part = f"user_{int(user_id)}" if user_id is not None else "user_system"
+    safe_session = re.sub(r"[^a-zA-Z0-9_.-]+", "_", session_id).strip("_") or "default"
+    return f"{user_part}/{safe_session}"
+
+
+def _screenshots_dir(user_id: int | None = None, session_id: str = "default") -> Path:
+    root = (
+        Path(__file__).resolve().parent.parent.parent.parent
+        / "data"
+        / "screenshots"
+        / (f"user_{int(user_id)}" if user_id is not None else "user_system")
+        / (re.sub(r"[^a-zA-Z0-9_.-]+", "_", session_id).strip("_") or "default")
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def cleanup_screenshots_dir(user_id: int | None = None, session_id: str = "default") -> None:
+    root = _screenshots_dir(user_id, session_id)
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _cleanup_screenshots_namespace(namespace: str) -> None:
+    root = Path(__file__).resolve().parent.parent.parent.parent / "data" / "screenshots" / namespace
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ── 浏览器状态单例 ────────────────────────────────────────────────────────────
@@ -664,13 +699,14 @@ class BrowserSessionManager:
                     raise
         return self._browser
 
-    async def get_page(self, session_id: str) -> Any:
+    async def get_page(self, session_id: str, user_id: int | None = None) -> Any:
         """获取指定会话的 Page，必要时惰性创建 BrowserContext。"""
         async with self._lock:
-            if session_id not in self._sessions:
-                self._sessions[session_id] = _BrowserSession(session_id)
+            key = _browser_namespace(user_id, session_id)
+            if key not in self._sessions:
+                self._sessions[key] = _BrowserSession(key)
 
-            session = self._sessions[session_id]
+            session = self._sessions[key]
             session.touch()
 
             browser = await self._ensure_browser()
@@ -686,27 +722,29 @@ class BrowserSessionManager:
 
             return session._page
 
-    def get_session(self, session_id: str) -> _BrowserSession | None:
-        return self._sessions.get(session_id)
+    def get_session(self, session_id: str, user_id: int | None = None) -> _BrowserSession | None:
+        return self._sessions.get(_browser_namespace(user_id, session_id))
 
-    def get_or_create_session(self, session_id: str) -> _BrowserSession:
-        if session_id not in self._sessions:
-            self._sessions[session_id] = _BrowserSession(session_id)
-        return self._sessions[session_id]
+    def get_or_create_session(self, session_id: str, user_id: int | None = None) -> _BrowserSession:
+        key = _browser_namespace(user_id, session_id)
+        if key not in self._sessions:
+            self._sessions[key] = _BrowserSession(key)
+        return self._sessions[key]
 
     async def take_screenshot(
         self,
         session_id: str,
+        user_id: int | None = None,
         selector: str | None = None,
         full_page: bool = False,
     ) -> str:
         """截图后保存到磁盘，返回 URL 路径。"""
-        page = await self.get_page(session_id)
-        session = self._sessions[session_id]
+        page = await self.get_page(session_id, user_id=user_id)
+        session = self._sessions[_browser_namespace(user_id, session_id)]
         session.touch()
 
         fname = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-        dest = _screenshots_dir(session_id) / fname
+        dest = _screenshots_dir(user_id, session_id) / fname
 
         try:
             if selector:
@@ -725,21 +763,26 @@ class BrowserSessionManager:
         session.last_screenshot_url = url
         return url
 
-    async def close_session(self, session_id: str) -> None:
+    async def close_session(self, session_id: str, user_id: int | None = None) -> None:
         """关闭指定会话的 BrowserContext，释放资源。"""
-        session = self._sessions.pop(session_id, None)
+        await self._close_session_by_key(_browser_namespace(user_id, session_id))
+
+    async def _close_session_by_key(self, key: str) -> None:
+        session = self._sessions.pop(key, None)
         if session is None:
+            _cleanup_screenshots_namespace(key)
             return
         try:
             if session._context:
                 await session._context.close()
         except Exception:
             pass
-        logger.info("会话 %s 的浏览器已关闭", session_id)
+        _cleanup_screenshots_namespace(key)
+        logger.info("会话 %s 的浏览器已关闭", key)
 
-    async def reset_session(self, session_id: str) -> None:
+    async def reset_session(self, session_id: str, user_id: int | None = None) -> None:
         """重置会话：关闭并清理后等待下一次惰性重建。"""
-        await self.close_session(session_id)
+        await self.close_session(session_id, user_id=user_id)
 
     async def cleanup_idle_sessions(self) -> int:
         """清理超时未活跃的会话，返回清理数量。"""
@@ -750,7 +793,7 @@ class BrowserSessionManager:
             if now - s.last_active > self.SESSION_IDLE_TIMEOUT
         ]
         for sid in expired:
-            await self.close_session(sid)
+            await self._close_session_by_key(sid)
         if expired:
             logger.info("清理了 %d 个空闲浏览器会话", len(expired))
         return len(expired)
@@ -758,7 +801,7 @@ class BrowserSessionManager:
     async def cleanup(self) -> None:
         """关闭所有会话并释放 Browser 进程（服务器关闭时调用）。"""
         for sid in list(self._sessions.keys()):
-            await self.close_session(sid)
+            await self._close_session_by_key(sid)
         try:
             if self._browser:
                 await self._browser.close()
@@ -839,6 +882,7 @@ class BrowserNavigateTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
         attempts = max(1, retry_count + 1)
         delay_ms = max(0, retry_delay_ms)
         last_exc: Exception | None = None
@@ -850,11 +894,12 @@ class BrowserNavigateTool(BaseTool):
                     fallback = await asyncio.to_thread(
                         _sync_navigate_and_screenshot,
                         session_id,
+                        user_id,
                         url,
                         wait_for,
                         timeout,
                     )
-                    session = mgr.get_or_create_session(session_id)
+                    session = mgr.get_or_create_session(session_id, user_id=user_id)
                     session.current_url = fallback["url"]
                     session.page_title = fallback["title"]
                     session.last_screenshot_url = fallback["screenshot_url"]
@@ -872,7 +917,7 @@ class BrowserNavigateTool(BaseTool):
                         ensure_ascii=False,
                     )
 
-                page = await mgr.get_page(session_id)
+                page = await mgr.get_page(session_id, user_id=user_id)
                 current_wait_for = wait_for
                 try:
                     await page.goto(url, wait_until=current_wait_for, timeout=timeout)
@@ -885,10 +930,10 @@ class BrowserNavigateTool(BaseTool):
 
                 title = await page.title()
                 actual_url = page.url
-                session = mgr.get_or_create_session(session_id)
+                session = mgr.get_or_create_session(session_id, user_id=user_id)
                 session.current_url = actual_url
                 session.page_title = title
-                screenshot_url = await mgr.take_screenshot(session_id)
+                screenshot_url = await mgr.take_screenshot(session_id, user_id=user_id)
                 return json.dumps(
                     {
                         "success": True,
@@ -908,11 +953,12 @@ class BrowserNavigateTool(BaseTool):
                     fallback = await asyncio.to_thread(
                         _sync_navigate_and_screenshot,
                         session_id,
+                        user_id,
                         url,
                         wait_for,
                         timeout,
                     )
-                    session = mgr.get_or_create_session(session_id)
+                    session = mgr.get_or_create_session(session_id, user_id=user_id)
                     session.current_url = fallback["url"]
                     session.page_title = fallback["title"]
                     session.last_screenshot_url = fallback["screenshot_url"]
@@ -932,7 +978,7 @@ class BrowserNavigateTool(BaseTool):
                 last_exc = exc
                 # 导航失败后重置会话，避免坏掉的 Page/Context 污染后续重试。
                 try:
-                    await mgr.reset_session(session_id)
+                    await mgr.reset_session(session_id, user_id=user_id)
                 except Exception:
                     pass
                 if attempt < attempts and delay_ms > 0:
@@ -987,20 +1033,22 @@ class BrowserScreenshotTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面，请先使用 browser_navigate")
         if not _supports_async_playwright_subprocess():
             screenshot_url = await asyncio.to_thread(
                 _sync_screenshot_from_url,
                 session_id,
+                user_id,
                 session.current_url,
                 full_page,
                 selector,
             )
             session.last_screenshot_url = screenshot_url
         else:
-            screenshot_url = await mgr.take_screenshot(session_id, selector=selector, full_page=full_page)
+            screenshot_url = await mgr.take_screenshot(session_id, user_id=user_id, selector=selector, full_page=full_page)
         if not screenshot_url:
             raise ToolExecutionError(self.name, "截图失败")
         return json.dumps(
@@ -1053,7 +1101,8 @@ class BrowserExtractTextTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
@@ -1061,6 +1110,7 @@ class BrowserExtractTextTool(BaseTool):
                 out = await asyncio.to_thread(
                     _sync_extract_text,
                     session_id,
+                    user_id,
                     session.current_url,
                     selector,
                     include_title,
@@ -1073,7 +1123,7 @@ class BrowserExtractTextTool(BaseTool):
                     session.last_screenshot_url = out["screenshot_url"]
                 return json.dumps(out, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             out: dict[str, Any] = {"url": page.url}
             if include_title:
                 out["title"] = await page.title()
@@ -1097,7 +1147,7 @@ class BrowserExtractTextTool(BaseTool):
                 else:
                     out["text"] = ""
 
-            out["screenshot_url"] = await mgr.take_screenshot(session_id)
+            out["screenshot_url"] = await mgr.take_screenshot(session_id, user_id=user_id)
             return json.dumps(out, ensure_ascii=False)
         except Exception as exc:
             raise ToolExecutionError(self.name, f"提取文本失败: {exc}") from exc
@@ -1143,7 +1193,8 @@ class BrowserExtractAttrsTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         target_attrs = attrs or ["href", "src"]
@@ -1151,6 +1202,8 @@ class BrowserExtractAttrsTool(BaseTool):
             if not _supports_async_playwright_subprocess():
                 out = await asyncio.to_thread(
                     _sync_extract_attrs,
+                    session_id,
+                    user_id,
                     session.current_url,
                     selector,
                     target_attrs,
@@ -1158,7 +1211,7 @@ class BrowserExtractAttrsTool(BaseTool):
                 )
                 return json.dumps(out, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             elements = await page.query_selector_all(selector)
             items: list[dict[str, str]] = []
             for el in elements[:max_items]:
@@ -1233,13 +1286,16 @@ class BrowserExtractTableTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
             if not _supports_async_playwright_subprocess():
                 out = await asyncio.to_thread(
                     _sync_extract_table,
+                    session_id,
+                    user_id,
                     session.current_url,
                     selector,
                     table_index,
@@ -1247,7 +1303,7 @@ class BrowserExtractTableTool(BaseTool):
                 )
                 return json.dumps(out, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             tables = await page.query_selector_all(selector)
             if not tables:
                 return json.dumps(
@@ -1346,7 +1402,8 @@ class BrowserScrollTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
@@ -1354,6 +1411,7 @@ class BrowserScrollTool(BaseTool):
                 out = await asyncio.to_thread(
                     _sync_scroll,
                     session_id,
+                    user_id,
                     session.current_url,
                     direction,
                     amount,
@@ -1366,7 +1424,7 @@ class BrowserScrollTool(BaseTool):
                     session.last_screenshot_url = out["screenshot_url"]
                 return json.dumps({k: v for k, v in out.items() if k != "title"}, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             if direction == "bottom":
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             elif direction == "top":
@@ -1381,7 +1439,7 @@ class BrowserScrollTool(BaseTool):
 
             scroll_y = await page.evaluate("window.scrollY")
             page_height = await page.evaluate("document.body.scrollHeight")
-            screenshot_url = await mgr.take_screenshot(session_id)
+            screenshot_url = await mgr.take_screenshot(session_id, user_id=user_id)
 
             return json.dumps(
                 {
@@ -1437,7 +1495,8 @@ class BrowserClickTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         if not selector and not text:
@@ -1447,6 +1506,7 @@ class BrowserClickTool(BaseTool):
                 out = await asyncio.to_thread(
                     _sync_click,
                     session_id,
+                    user_id,
                     session.current_url,
                     selector,
                     text,
@@ -1459,7 +1519,7 @@ class BrowserClickTool(BaseTool):
                     session.last_screenshot_url = out["screenshot_url"]
                 return json.dumps(out, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             prev_url = page.url
 
             async def do_click():
@@ -1482,7 +1542,7 @@ class BrowserClickTool(BaseTool):
             title = await page.title()
             session.current_url = new_url
             session.page_title = title
-            screenshot_url = await mgr.take_screenshot(session_id)
+            screenshot_url = await mgr.take_screenshot(session_id, user_id=user_id)
 
             return json.dumps(
                 {
@@ -1556,7 +1616,8 @@ class BrowserExtractListTool(BaseTool):
         **_: Any,
     ) -> str:
         mgr = get_browser_manager()
-        session = mgr.get_session(session_id)
+        user_id = _.get("current_user_id") if isinstance(_, dict) else None
+        session = mgr.get_session(session_id, user_id=user_id)
         if not session or not session.current_url:
             raise ToolExecutionError(self.name, "尚未导航到任何页面")
         try:
@@ -1564,6 +1625,7 @@ class BrowserExtractListTool(BaseTool):
                 out = await asyncio.to_thread(
                     _sync_extract_list,
                     session_id,
+                    user_id,
                     session.current_url,
                     item_selector,
                     fields,
@@ -1579,7 +1641,7 @@ class BrowserExtractListTool(BaseTool):
                     session.last_screenshot_url = out["screenshot_url"]
                 return json.dumps({k: v for k, v in out.items() if k != "title"}, ensure_ascii=False)
 
-            page = await mgr.get_page(session_id)
+            page = await mgr.get_page(session_id, user_id=user_id)
             all_items: list[dict] = []
             pages_scraped = 0
 
@@ -1633,7 +1695,7 @@ class BrowserExtractListTool(BaseTool):
                     except Exception:
                         break
 
-            screenshot_url = await mgr.take_screenshot(session_id)
+            screenshot_url = await mgr.take_screenshot(session_id, user_id=user_id)
             return json.dumps(
                 {
                     "success": True,

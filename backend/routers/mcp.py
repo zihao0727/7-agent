@@ -20,7 +20,7 @@ class MCPAddRequest(BaseModel):
 
 @router.get("/mcp")
 async def list_mcp_servers(current_user: dict = Depends(require_current_user)) -> dict:
-    state = get_app_state()
+    state = get_app_state(int(current_user["id"]))
     return {"servers": state.get_mcp_servers_info()}
 
 
@@ -34,7 +34,7 @@ async def add_mcp_server(
     if body.transport == "sse" and not body.url:
         raise HTTPException(status_code=422, detail="sse 模式必须提供 url")
 
-    state = get_app_state()
+    state = get_app_state(int(current_user["id"]))
     cfg = await state.add_mcp_server(
         name=body.name,
         transport=body.transport,
@@ -55,7 +55,7 @@ async def add_mcp_server(
 async def remove_mcp_server(
     server_id: str, current_user: dict = Depends(require_current_user)
 ) -> dict:
-    state = get_app_state()
+    state = get_app_state(int(current_user["id"]))
     ok = state.remove_mcp_server(server_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"MCP server '{server_id}' 不存在")

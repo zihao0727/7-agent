@@ -7,11 +7,14 @@ import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   Brain,
+  BookOpen,
   Bot,
+  Camera,
   ChevronRight,
   ChevronsLeft,
   Clock,
   Code2Icon,
+  Loader2,
   LogOut,
   MonitorIcon,
   Moon,
@@ -28,6 +31,7 @@ import { SessionsPanel } from "./panels/SessionsPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { CodePanel } from "./CodePanel";
 import { useAuth } from "./AuthProvider";
+import { updateCurrentUserAvatar, isChatBusy } from "@/lib/api";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -38,10 +42,11 @@ export function AppShell({ children }: AppShellProps) {
   const pathname = usePathname();
   const currentSessionId = sessionIdFromAppPath(pathname);
   const { theme, setTheme } = useTheme();
-  const { user, signOut } = useAuth();
+  const { user, signOut, refreshCurrentUser } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>("tools");
   const [leftNavCollapsed, setLeftNavCollapsed] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
   const [sessionBrowserStates, setSessionBrowserStates] = useState<Map<string, boolean>>(
     new Map()
   );
@@ -49,6 +54,7 @@ export function AppShell({ children }: AppShellProps) {
     new Map()
   );
   const prevSessionIdRef = useRef<string | undefined>(undefined);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -75,6 +81,9 @@ export function AppShell({ children }: AppShellProps) {
   };
 
   const handleSelectSession = (id: string | undefined) => {
+    if (isChatBusy() && id !== currentSessionId) {
+      return;
+    }
     if (id) router.push(`/app/${id}`);
     else router.push("/app");
   };
@@ -122,6 +131,29 @@ export function AppShell({ children }: AppShellProps) {
 
   const displayName = user?.display_name?.trim() || user?.email || "账户";
 
+  const handleAvatarFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || avatarUploading) return;
+    if (!file.type.startsWith("image/")) return;
+
+    setAvatarUploading(true);
+    try {
+      const avatarUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      await updateCurrentUserAvatar(avatarUrl);
+      await refreshCurrentUser();
+    } catch (error) {
+      console.error("upload avatar failed", error);
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
   const handleLogout = async () => {
     await signOut();
     router.replace("/login");
@@ -149,8 +181,11 @@ export function AppShell({ children }: AppShellProps) {
           >
             <ChevronRight className="h-4 w-4" />
           </button>
-          <Link
-            href="/app"
+          <button
+            type="button"
+            onClick={() => {
+              if (!isChatBusy()) router.push("/app");
+            }}
             className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-gray-200 dark:hover:bg-white/10"
             title="首页"
             aria-label="首页"
@@ -163,7 +198,7 @@ export function AppShell({ children }: AppShellProps) {
               className="h-7 w-7 object-contain"
               priority
             />
-          </Link>
+          </button>
           <Link
             href="/app/memories"
             className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
@@ -175,6 +210,30 @@ export function AppShell({ children }: AppShellProps) {
             aria-label="长期记忆"
           >
             <Brain className="h-4 w-4" />
+          </Link>
+          <Link
+            href="/app/scheduled-tasks"
+            className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+              pathname === "/app/scheduled-tasks"
+                ? "bg-gray-300 text-gray-800 dark:bg-white/20 dark:text-gray-200"
+                : "text-gray-400 hover:bg-gray-200 dark:hover:bg-white/10"
+            }`}
+            title="定时任务"
+            aria-label="定时任务"
+          >
+            <Clock className="h-4 w-4" />
+          </Link>
+          <Link
+            href="/app/knowledge"
+            className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+              pathname === "/app/knowledge"
+                ? "bg-gray-300 text-gray-800 dark:bg-white/20 dark:text-gray-200"
+                : "text-gray-400 hover:bg-gray-200 dark:hover:bg-white/10"
+            }`}
+            title="个人知识库"
+            aria-label="个人知识库"
+          >
+            <BookOpen className="h-4 w-4" />
           </Link>
           {showCodePanel && (
             <button
@@ -208,8 +267,11 @@ export function AppShell({ children }: AppShellProps) {
       ) : (
         <div className="flex w-[280px] flex-shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-[#f9f9f9] transition-[width] duration-200 dark:border-[#222222] dark:bg-[#111111]">
           <div className="flex h-[52px] flex-shrink-0 items-center justify-between gap-2 px-5 py-3">
-            <Link
-              href="/app"
+            <button
+              type="button"
+              onClick={() => {
+                if (!isChatBusy()) router.push("/app");
+              }}
               className="flex min-w-0 items-center gap-2.5 transition-opacity hover:opacity-80"
               aria-label="首页"
             >
@@ -224,7 +286,7 @@ export function AppShell({ children }: AppShellProps) {
               <h3 className="font-display truncate text-2xl font-extrabold tracking-tight text-gray-900 dark:text-gray-100">
                 SevnX
               </h3>
-            </Link>
+            </button>
 
             <div className="flex shrink-0 items-center gap-1.5">
               {showCodePanel && (
@@ -294,13 +356,28 @@ export function AppShell({ children }: AppShellProps) {
                   <span className="ml-auto h-1.5 w-1.5 flex-shrink-0 rounded-full bg-blue-500" />
                 )}
               </button>
-              <button
-                type="button"
-                className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-gray-700 transition-all hover:bg-gray-200/50 dark:text-gray-300 dark:hover:bg-white/5"
+              <Link
+                href="/app/scheduled-tasks"
+                className={`group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-all hover:bg-gray-200/50 dark:hover:bg-white/5 ${
+                  pathname === "/app/scheduled-tasks"
+                    ? "bg-gray-200/80 text-gray-900 dark:bg-white/10 dark:text-gray-100"
+                    : "text-gray-700 dark:text-gray-300"
+                }`}
               >
                 <Clock className="h-4 w-4" />
                 <span className="text-sm font-medium">定时任务</span>
-              </button>
+              </Link>
+              <Link
+                href="/app/knowledge"
+                className={`group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-all hover:bg-gray-200/50 dark:hover:bg-white/5 ${
+                  pathname === "/app/knowledge"
+                    ? "bg-gray-200/80 text-gray-900 dark:bg-white/10 dark:text-gray-100"
+                    : "text-gray-700 dark:text-gray-300"
+                }`}
+              >
+                <BookOpen className="h-4 w-4" />
+                <span className="text-sm font-medium">个人知识库</span>
+              </Link>
             </div>
 
             <div className="flex flex-col gap-0.5">
@@ -375,9 +452,39 @@ export function AppShell({ children }: AppShellProps) {
             <div className="mt-auto border-t border-gray-200/70 px-2 pt-4 dark:border-white/10">
               <div className="rounded-2xl border border-gray-200/80 bg-white/80 p-3 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-700 dark:bg-white/10 dark:text-gray-200">
-                    <UserCircle2 className="h-5 w-5" />
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => avatarInputRef.current?.click()}
+                    disabled={avatarUploading}
+                    className="group relative flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:cursor-not-allowed dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/15"
+                    title="上传头像"
+                    aria-label="上传头像"
+                  >
+                    {user?.avatar_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={user.avatar_url}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <UserCircle2 className="h-5 w-5" />
+                    )}
+                    <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/35 group-hover:opacity-100">
+                      {avatarUploading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Camera className="h-4 w-4" />
+                      )}
+                    </span>
+                  </button>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleAvatarFile}
+                  />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
                       {displayName}

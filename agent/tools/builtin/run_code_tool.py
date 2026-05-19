@@ -23,6 +23,8 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.workspace import session_subdir, session_workspace_root
+
 from ..base import BaseTool, ToolExecutionError, ToolSchema
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32,15 +34,21 @@ from ..base import BaseTool, ToolExecutionError, ToolSchema
 _store: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
 
 
-def get_code_results(session_id: str) -> list[dict]:
+def _store_key(session_id: str, user_id: int | None = None) -> str:
+    user_part = f"user:{int(user_id)}" if user_id is not None else "user:system"
+    return f"{user_part}:session:{session_id}"
+
+
+def get_code_results(session_id: str, user_id: int | None = None) -> list[dict]:
     """返回指定 session 的执行历史（最新在后）"""
-    return list(_store.get(session_id, []))
+    return list(_store.get(_store_key(session_id, user_id), []))
 
 
-def clear_code_results(session_id: str) -> None:
+def clear_code_results(session_id: str, user_id: int | None = None) -> None:
     """清除指定 session 的执行历史"""
-    if session_id in _store:
-        _store[session_id].clear()
+    key = _store_key(session_id, user_id)
+    if key in _store:
+        _store[key].clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,9 +166,9 @@ def _python_utf8_env() -> dict[str, str]:
 # 各语言执行器
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _exec_python(code: str, timeout: int) -> tuple[str, str, int, list[str]]:
+async def _exec_python(code: str, timeout: int, workspace: str) -> tuple[str, str, int, list[str]]:
     wrapped = _MATPLOTLIB_PREAMBLE + code + _MATPLOTLIB_POSTAMBLE
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8", dir=workspace) as f:
         f.write(wrapped)
         path = f.name
     try:
@@ -169,6 +177,7 @@ async def _exec_python(code: str, timeout: int) -> tuple[str, str, int, list[str
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_python_utf8_env(),
+            cwd=workspace,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -192,13 +201,14 @@ async def _exec_python(code: str, timeout: int) -> tuple[str, str, int, list[str
         except Exception: pass
 
 
-async def _exec_node(code: str, timeout: int) -> tuple[str, str, int, list[str]]:
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs", delete=False, encoding="utf-8") as f:
+async def _exec_node(code: str, timeout: int, workspace: str) -> tuple[str, str, int, list[str]]:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs", delete=False, encoding="utf-8", dir=workspace) as f:
         f.write(code); path = f.name
     try:
         proc = await asyncio.create_subprocess_exec(
             "node", path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=workspace,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -211,8 +221,8 @@ async def _exec_node(code: str, timeout: int) -> tuple[str, str, int, list[str]]
         except Exception: pass
 
 
-async def _exec_typescript(code: str, timeout: int) -> tuple[str, str, int, list[str]]:
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ts", delete=False, encoding="utf-8") as f:
+async def _exec_typescript(code: str, timeout: int, workspace: str) -> tuple[str, str, int, list[str]]:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ts", delete=False, encoding="utf-8", dir=workspace) as f:
         f.write(code); path = f.name
     npx = "npx.cmd" if sys.platform == "win32" else "npx"
     try:
@@ -220,6 +230,7 @@ async def _exec_typescript(code: str, timeout: int) -> tuple[str, str, int, list
             proc = await asyncio.create_subprocess_exec(
                 *runner,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=workspace,
             )
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -234,7 +245,7 @@ async def _exec_typescript(code: str, timeout: int) -> tuple[str, str, int, list
         except Exception: pass
 
 
-async def _exec_bash(code: str, timeout: int) -> tuple[str, str, int, list[str]]:
+async def _exec_bash(code: str, timeout: int, workspace: str) -> tuple[str, str, int, list[str]]:
     if sys.platform == "win32":
         bash = next(
             (c for c in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe", "bash"]
@@ -246,6 +257,7 @@ async def _exec_bash(code: str, timeout: int) -> tuple[str, str, int, list[str]]
     proc = await asyncio.create_subprocess_exec(
         bash, "-c", code,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=workspace,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -273,7 +285,7 @@ class RunCodeTool(BaseTool):
         "【适用场景】数据分析、算法验证、可视化、文件处理、前端动画（可用 javascript 输出 HTML 到 stdout 供用户复制）等。\n"
         "【支持语言】python（matplotlib/numpy/pandas）、javascript、typescript、bash。\n"
         "【绘图】Python 中 matplotlib 的 plt.show() 会自动捕获图表展示给用户。\n"
-        "【注意】每次调用独立进程，变量不跨调用共享。"
+        "【注意】每次调用独立进程，变量不跨调用共享；返回给模型的是 stdout/stderr 摘要，不要通过反复打印整份文件来读取数据，文件处理请输出结构化摘要并保存结果文件。"
     )
 
     def schema(self) -> ToolSchema:
@@ -317,6 +329,7 @@ class RunCodeTool(BaseTool):
         description: str | None = None,
         language: str = "python",
         session_id: str = "",
+        current_user_id: int | None = None,
         timeout: int = 30,
         **_: Any,
     ) -> str:
@@ -335,16 +348,22 @@ class RunCodeTool(BaseTool):
                 "调用 run_code 时必须提供非空字符串参数 description（简述本次代码目的，将展示给用户）。",
             )
 
+        if current_user_id is None:
+            raise ToolExecutionError(self.name, "Missing current_user_id for workspace-isolated code execution.")
+        scoped_session_id = session_id or "default"
+        session_workspace_root(int(current_user_id), scoped_session_id)
+        workspace = str(session_subdir(int(current_user_id), scoped_session_id, "code"))
+
         start = time.monotonic()
 
         if language == "python":
-            stdout, stderr, exit_code, images = await _exec_python(code_s, timeout)
+            stdout, stderr, exit_code, images = await _exec_python(code_s, timeout, workspace)
         elif language == "javascript":
-            stdout, stderr, exit_code, images = await _exec_node(code_s, timeout)
+            stdout, stderr, exit_code, images = await _exec_node(code_s, timeout, workspace)
         elif language == "typescript":
-            stdout, stderr, exit_code, images = await _exec_typescript(code_s, timeout)
+            stdout, stderr, exit_code, images = await _exec_typescript(code_s, timeout, workspace)
         elif language == "bash":
-            stdout, stderr, exit_code, images = await _exec_bash(code_s, timeout)
+            stdout, stderr, exit_code, images = await _exec_bash(code_s, timeout, workspace)
         else:
             raise ToolExecutionError(self.name, f"不支持的语言: {language}")
 
@@ -363,17 +382,25 @@ class RunCodeTool(BaseTool):
             "images": images,
             "execution_time": round(elapsed, 3),
         }
-        if session_id:
-            _store[session_id].append(record)
+        _store[_store_key(scoped_session_id, current_user_id)].append(record)
 
         # 返回给 AI 的简洁摘要
         status = "成功" if exit_code == 0 else f"失败(exit={exit_code})"
         parts = [f"[{language}] {desc_s} — 执行{status}，耗时 {elapsed:.2f}s"]
         if stdout:
-            preview = stdout[:500] + ("…" if len(stdout) > 500 else "")
+            limit = 4000
+            preview = stdout[:limit]
+            if len(stdout) > limit:
+                preview += (
+                    "\n\n[stdout preview truncated; full stdout is shown in the code panel. "
+                    "Do not retry only to print more rows. Save complete data to a file or print a compact summary.]"
+                )
             parts.append(f"stdout:\n{preview}")
         if stderr:
-            preview = stderr[:300] + ("…" if len(stderr) > 300 else "")
+            limit = 1200
+            preview = stderr[:limit]
+            if len(stderr) > limit:
+                preview += "\n\n[stderr preview truncated.]"
             parts.append(f"stderr:\n{preview}")
         if images:
             parts.append(f"已生成 {len(images)} 张图表，已展示给用户。")

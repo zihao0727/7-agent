@@ -4,6 +4,7 @@
 
 from .bash import BashTool
 from .file_ops import (
+    EditFileTool,
     GlobSearchTool,
     ListDirTool,
     ReadFileTool,
@@ -13,19 +14,43 @@ from .file_ops import (
 from .run_code_tool import RunCodeTool  # 由 code_runner Skill 注册，非默认内置
 from .web_search import WebSearchTool
 from .time_tool import CurrentTimeTool
-from .lark_cli_tool import LarkCliTool
+from .lark import (
+    LarkApiTool,
+    LarkAuthTool,
+    LarkCalendarCreateTool,
+    LarkCalendarQueryTool,
+    LarkCommandTool,
+    LarkCreateDocTool,
+    LarkMyTasksTool,
+    LarkRelatedTasksTool,
+    LarkSendMessageTool,
+)
+from .scheduled_task_tool import CreateScheduledTaskTool
+from .knowledge_base import KnowledgeListDocumentsTool, KnowledgeSearchTool
 
 __all__ = [
     "BashTool",
     "ReadFileTool",
     "WriteFileTool",
     "StrReplaceTool",
+    "EditFileTool",
     "ListDirTool",
     "GlobSearchTool",
     "RunCodeTool",
     "WebSearchTool",
     "CurrentTimeTool",
-    "LarkCliTool",
+    "LarkApiTool",
+    "LarkAuthTool",
+    "LarkCalendarCreateTool",
+    "LarkCalendarQueryTool",
+    "LarkCommandTool",
+    "LarkCreateDocTool",
+    "LarkMyTasksTool",
+    "LarkRelatedTasksTool",
+    "LarkSendMessageTool",
+    "CreateScheduledTaskTool",
+    "KnowledgeSearchTool",
+    "KnowledgeListDocumentsTool",
 ]
 
 
@@ -36,8 +61,10 @@ def get_default_tools() -> list:
         ReadFileTool(),
         WriteFileTool(),
         StrReplaceTool(),
+        EditFileTool(),
         ListDirTool(),
         GlobSearchTool(),
         WebSearchTool(),
         CurrentTimeTool(),
+        CreateScheduledTaskTool(),
     ]

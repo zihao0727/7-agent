@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -10,22 +11,25 @@ from pydantic import BaseModel
 from backend.agent_runner import run_agent_streaming
 from backend.auth_dependencies import require_current_user
 from backend.chat_upload_materialize import materialize_chat_uploads
+from backend.intent_router import classify_intent
 from backend.memory_service import build_memory_context
 from backend.message_converter import ai_sdk_to_openai
 from backend.session_access import assert_session_owned
 from backend.state import get_app_state
+from backend.workspace import safe_segment
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
+_SAFE_SESSION_TOKEN = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
 class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
-    id: str | None = None               # useChat 内部 thread id（SDK 自动发送）
-    sessionId: str | None = None        # 显式会话 ID（由前端 body 注入，用于浏览器 session 隔离）
-    system: str | None = None           # 可选：前端自定义 system prompt
-    model: str = "deepseek-v4-flash"    # 可选：模型选择（与 X-Model / 前端 id 对齐）
+    id: str | None = None
+    sessionId: str | None = None
+    system: str | None = None
+    model: str = "deepseek-v4-flash"
 
 
 @router.post("/chat")
@@ -34,39 +38,34 @@ async def chat(
     request: Request,
     current_user: dict = Depends(require_current_user),
 ) -> StreamingResponse:
-    """
-    接收 Vercel AI SDK useChat 发来的 messages，
-    运行 Agent 循环，流式返回数据流。
-
-    响应头：
-      Content-Type: text/plain; charset=utf-8
-      x-vercel-ai-data-stream: v1       ← AI SDK 必须识别的标记
-
-    支持从请求头中读取模型选择 (X-Model header)
-    文件上传处理：
-      - Word: 落盘，注入服务器路径
-      - PDF: 提取文本注入（Kimi 用 Files API，DeepSeek 用 pypdf）
-      - TXT: 读取文本注入
-      - 图片: 保留 vision 格式，发给支持多模态的模型
-    """
-    state = get_app_state()
-
-    # 从请求头中获取模型选择，优先级：请求头 > 请求体 > 默认值
+    user_id = int(current_user["id"])
+    state = get_app_state(user_id)
     model = request.headers.get("X-Model", req.model)
 
-    # materialize_chat_uploads 现在是 async（可能调用 Kimi Files API）
-    messages_with_paths = await materialize_chat_uploads(req.messages, model=model)
-    openai_messages = ai_sdk_to_openai(messages_with_paths, model=model)
-    memory_context = await build_memory_context(current_user["id"], openai_messages)
+    if req.sessionId:
+        session_id = req.sessionId
+        await assert_session_owned(session_id, user_id)
+    else:
+        thread_id = _SAFE_SESSION_TOKEN.sub("_", req.id or "default").strip("_") or "default"
+        session_id = f"user_{user_id}_thread_{safe_segment(thread_id)}"
 
-    # sessionId 优先（前端 body 显式注入），其次 id（SDK thread id），最后 default
-    session_id = req.sessionId or req.id or "default"
-    if session_id != "default":
-        await assert_session_owned(session_id, current_user["id"])
+    messages_with_paths = await materialize_chat_uploads(
+        req.messages,
+        model=model,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    openai_messages = ai_sdk_to_openai(messages_with_paths, model=model)
+    intent_route = classify_intent(openai_messages, state)
+    memory_context = await build_memory_context(user_id, openai_messages)
 
     logger.info(
-        "Chat 请求 session=%s，消息数=%d，工具数=%d，模型=%s",
-        session_id, len(req.messages), len(state.tool_registry), model,
+        "Chat request session=%s messages=%d tools=%d model=%s user=%s",
+        session_id,
+        len(req.messages),
+        len(state.tool_registry),
+        model,
+        user_id,
     )
 
     async def generator():
@@ -77,7 +76,8 @@ async def chat(
             model=model,
             session_id=session_id,
             memory_context=memory_context,
-            current_user_id=int(current_user["id"]),
+            current_user_id=user_id,
+            intent_route=intent_route,
         ):
             yield line
 

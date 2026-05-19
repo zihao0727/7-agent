@@ -17,6 +17,7 @@ import {
   getSession,
   summarizeSession,
   notifySessionsListRefresh,
+  setChatBusy,
 } from "@/lib/api";
 import {
   buildPersistableAttachments,
@@ -90,10 +91,21 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
     }
   }, []);
 
+  // 广播忙碌状态：AI 正在回复 或 标题正在生成中
+  useEffect(() => {
+    setChatBusy(chat.isLoading || summarizeTimerRef.current !== null);
+  }, [chat.isLoading]);
+
+  // 组件卸载时清除忙碌状态
+  useEffect(() => {
+    return () => setChatBusy(false);
+  }, []);
+
   const scheduleSessionSummary = useCallback(
     (targetSessionId: string) => {
       clearPendingSummary();
       const token = ++summarizeTokenRef.current;
+      setChatBusy(true);
       summarizeTimerRef.current = window.setTimeout(() => {
         summarizeTimerRef.current = null;
         void summarizeSession(targetSessionId)
@@ -104,6 +116,10 @@ export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
           .catch((error) => {
             if (summarizeTokenRef.current !== token) return;
             console.error("session summary failed", error);
+          })
+          .finally(() => {
+            if (summarizeTokenRef.current !== token) return;
+            setChatBusy(false);
           });
       }, TITLE_SUMMARY_DEBOUNCE_MS);
     },

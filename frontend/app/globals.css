@@ -50,3 +50,322 @@
 [data-aui-root] {
   height: 100%;
 }
+
+@keyframes assistantAvatarBreathe {
+  0%,
+  100% {
+    transform: scale(0.94);
+    opacity: 0.48;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.92;
+  }
+}
+
+@keyframes assistantDotBounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.38;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+@keyframes assistantThinkingBar {
+  0% {
+    transform: translateX(-26%) scaleX(0.42);
+    opacity: 0;
+  }
+  50% {
+    transform: translateX(18%) scaleX(1);
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateX(76%) scaleX(0.56);
+    opacity: 0;
+  }
+}
+
+@keyframes assistantProgressWave {
+  0% {
+    transform: translateX(-115%);
+  }
+  100% {
+    transform: translateX(215%);
+  }
+}
+
+@keyframes assistantWaitPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.68);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes assistantWaitSheen {
+  0% {
+    transform: translateX(-132%) skewX(-18deg);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.48;
+  }
+  64% {
+    opacity: 0.22;
+  }
+  100% {
+    transform: translateX(132%) skewX(-18deg);
+    opacity: 0;
+  }
+}
+
+@keyframes assistantWaitAura {
+  0%,
+  100% {
+    opacity: 0.36;
+    transform: scale(0.84);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes assistantSubtleMark {
+  0%,
+  100% {
+    opacity: 0.32;
+    transform: scaleY(0.72);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scaleY(1);
+  }
+}
+
+@keyframes assistantInlineCursor {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.95;
+  }
+}
+
+@keyframes assistantThinkingText {
+  0%,
+  100% {
+    opacity: 0.45;
+    filter: blur(0);
+  }
+  45% {
+    opacity: 0.88;
+    filter: blur(0);
+  }
+  62% {
+    opacity: 0.62;
+    filter: blur(0.08px);
+  }
+}
+
+@keyframes loginGridDrift {
+  0%,
+  100% {
+    opacity: 0.58;
+    background-position: 0 0;
+  }
+  50% {
+    opacity: 0.74;
+    background-position: -18px 12px;
+  }
+}
+
+@keyframes loginGridWave {
+  0% {
+    opacity: 0;
+    transform: translate3d(-34%, -8%, 0) rotate(-7deg);
+  }
+  22% {
+    opacity: 0.5;
+  }
+  52% {
+    opacity: 0.2;
+  }
+  76% {
+    opacity: 0.58;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(42%, 12%, 0) rotate(-7deg);
+  }
+}
+
+.login-grid-wave {
+  overflow: hidden;
+  background-image:
+    linear-gradient(to right, rgba(9, 9, 11, 0.052) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(9, 9, 11, 0.04) 1px, transparent 1px);
+  background-position: 0 0;
+  background-size: 72px 72px;
+  transform: translate3d(var(--grid-pan-x, 0px), var(--grid-pan-y, 0px), 0) scale(var(--grid-scale, 1));
+  transform-origin: var(--grid-x, 50%) var(--grid-y, 50%);
+  transition:
+    transform 680ms cubic-bezier(0.16, 1.72, 0.28, 1),
+    opacity 320ms ease;
+  will-change: transform, opacity, background-position;
+  animation: loginGridDrift 9s ease-in-out infinite;
+}
+
+.login-grid-wave::before {
+  content: "";
+  position: absolute;
+  inset: -28%;
+  background-image:
+    linear-gradient(to right, rgba(9, 9, 11, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(9, 9, 11, 0.09) 1px, transparent 1px);
+  background-size: 72px 72px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 38%, black 58%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, black 38%, black 58%, transparent 100%);
+  opacity: 0;
+  animation: loginGridWave 12s cubic-bezier(0.42, 0, 0.18, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-grid-wave,
+  .login-grid-wave::before {
+    animation: none;
+  }
+}
+
+.assistant-avatar-breathe {
+  animation: assistantAvatarBreathe 1.9s ease-in-out infinite;
+}
+
+.assistant-thinking-dots > span:nth-child(1) {
+  animation: assistantDotBounce 1.25s ease-in-out infinite;
+}
+
+.assistant-thinking-dots > span {
+  display: block;
+  height: 3px;
+  width: 3px;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.assistant-thinking-dots > span:nth-child(2) {
+  animation: assistantDotBounce 1.25s ease-in-out 0.16s infinite;
+}
+
+.assistant-thinking-dots > span:nth-child(3) {
+  animation: assistantDotBounce 1.25s ease-in-out 0.32s infinite;
+}
+
+.assistant-thinking-bar {
+  animation: assistantThinkingBar 2.35s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  transform-origin: left center;
+}
+
+.assistant-breathing-orbit::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.28) 0%, rgba(59, 130, 246, 0.12) 42%, transparent 72%);
+  animation: assistantAvatarBreathe 1.7s ease-in-out infinite;
+}
+
+.assistant-progress-wave {
+  animation: assistantProgressWave 2.2s linear infinite;
+}
+
+.assistant-wait-pill {
+  position: relative;
+  isolation: isolate;
+}
+
+.assistant-wait-pill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  pointer-events: none;
+  background: linear-gradient(108deg, transparent 10%, rgba(255, 255, 255, 0.58) 43%, transparent 68%);
+  mix-blend-mode: soft-light;
+  animation: assistantWaitSheen 3.8s ease-in-out infinite;
+  z-index: -1;
+}
+
+.assistant-wait-pill::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 9999px;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), transparent 58%),
+    radial-gradient(circle at 18% 32%, rgba(56, 189, 248, 0.2), transparent 34%);
+  opacity: 0.74;
+  z-index: -2;
+}
+
+.assistant-wait-orb {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  height: 18px;
+  width: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.22), rgba(99, 102, 241, 0.14));
+  box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.18);
+}
+
+.assistant-wait-orb::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  background: radial-gradient(circle, rgba(14, 165, 233, 0.34), transparent 68%);
+  animation: assistantWaitAura 2.2s ease-in-out infinite;
+}
+
+.assistant-wait-core {
+  position: relative;
+  z-index: 1;
+  height: 7px;
+  width: 7px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, #0ea5e9, #6366f1);
+  box-shadow: 0 0 14px rgba(14, 165, 233, 0.55);
+  animation: assistantWaitPulse 1.8s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.assistant-subtle-mark {
+  animation: assistantSubtleMark 2.2s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.assistant-thinking-text {
+  animation: assistantThinkingText 1.85s ease-in-out infinite;
+}
+
+.assistant-inline-cursor {
+  animation: assistantInlineCursor 1.15s ease-in-out infinite;
+}

@@ -14,6 +14,9 @@ import { authorizedFetch } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 
 interface BrowserState {
+  session_id?: string;
+  user_id?: number;
+  namespace?: string;
   url: string;
   title: string;
   screenshot_url: string;
@@ -46,6 +49,19 @@ export function BrowserPanel({ open, onClose, sessionId }: BrowserPanelProps) {
       return null;
     });
   }, []);
+
+  useEffect(() => {
+    setState({
+      url: "",
+      title: "",
+      screenshot_url: "",
+      active: false,
+      namespace: sessionId,
+    });
+    setLastUpdated(null);
+    prevScreenshotRef.current = "";
+    revokeScreenshotUrl();
+  }, [revokeScreenshotUrl, sessionId]);
 
   const loadScreenshot = useCallback(
     async (relativeUrl: string) => {
@@ -201,6 +217,20 @@ export function BrowserPanel({ open, onClose, sessionId }: BrowserPanelProps) {
             </span>
             {state.title}
           </p>
+        </div>
+      )}
+
+      {(state.namespace || sessionId) && (
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-gray-100/80 bg-white px-5 py-2 dark:border-gray-800/80 dark:bg-gray-950">
+          <span className="select-none text-[11px] font-medium uppercase text-gray-400 dark:text-gray-500">
+            Namespace
+          </span>
+          <span
+            title={state.namespace || sessionId}
+            className="min-w-0 flex-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-400"
+          >
+            {state.namespace || sessionId}
+          </span>
         </div>
       )}
 

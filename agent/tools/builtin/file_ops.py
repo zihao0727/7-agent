@@ -1,25 +1,79 @@
-"""
-文件操作工具集 —— ReadFileTool / WriteFileTool / ListDirTool / GlobTool
-对标 Claude Code 的 Read / Write / LS / Glob 工具
-"""
+"""Cross-platform file operation tools."""
 
 from __future__ import annotations
 
-import glob as _glob
 import os
 from pathlib import Path
 from typing import Any
 
+from backend.workspace import resolve_workspace_path
+
 from ..base import BaseTool, ToolExecutionError, ToolSchema
 
-MAX_FILE_CHARS = 20_000  # 文件读取截断阈值
+MAX_FILE_CHARS = 20_000
+MAX_DIRECT_READ_BYTES = 1_000_000
+_BINARY_SAMPLE_BYTES = 8192
+
+
+def _path(value: str) -> Path:
+    return Path(os.path.expanduser(value))
+
+
+def _workspace_path(tool_name: str, value: str, current_user_id: int | None, session_id: str | None) -> Path:
+    if current_user_id is None:
+        raise ToolExecutionError(tool_name, "Missing current_user_id for workspace-isolated file access.")
+    try:
+        return resolve_workspace_path(value, user_id=int(current_user_id), session_id=session_id)
+    except ValueError as exc:
+        raise ToolExecutionError(tool_name, str(exc), cause=exc) from exc
+
+
+def _looks_binary(data: bytes) -> bool:
+    if not data:
+        return False
+    if b"\x00" in data:
+        return True
+    text_controls = {7, 8, 9, 10, 12, 13, 27}
+    suspicious = sum(1 for b in data if b < 32 and b not in text_controls)
+    return suspicious / max(1, len(data)) > 0.05
+
+
+def _ensure_text_file(tool_name: str, path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ToolExecutionError(tool_name, str(exc), cause=exc) from exc
+
+    if size > MAX_DIRECT_READ_BYTES:
+        raise ToolExecutionError(
+            tool_name,
+            (
+                f"File is too large for direct text reading ({size} bytes). "
+                "Please use a specialized tool or code-based streaming/analysis instead."
+            ),
+        )
+
+    try:
+        sample = path.read_bytes()[:_BINARY_SAMPLE_BYTES]
+    except OSError as exc:
+        raise ToolExecutionError(tool_name, str(exc), cause=exc) from exc
+
+    if _looks_binary(sample):
+        raise ToolExecutionError(
+            tool_name,
+            "This appears to be a binary file and cannot be read as plain text. "
+            "Please use a specialized file tool instead.",
+        )
 
 
 class ReadFileTool(BaseTool):
-    """读取文件内容，支持行范围截取"""
+    """Read a text file, optionally by line range."""
 
     name = "read_file"
-    description = "读取本地文件内容，可指定起始行和结束行。"
+    description = (
+        "Read a local text file, optionally by 1-indexed line range. "
+        "For binary files or large files, returns a clear error asking to use a specialized tool."
+    )
 
     def schema(self) -> ToolSchema:
         return ToolSchema(
@@ -28,14 +82,14 @@ class ReadFileTool(BaseTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件路径"},
+                    "path": {"type": "string", "description": "File path"},
                     "start_line": {
                         "type": "integer",
-                        "description": "起始行（1-indexed，可选）",
+                        "description": "Start line, 1-indexed",
                     },
                     "end_line": {
                         "type": "integer",
-                        "description": "结束行（含，可选）",
+                        "description": "End line, inclusive",
                     },
                 },
                 "required": ["path"],
@@ -47,12 +101,15 @@ class ReadFileTool(BaseTool):
         path: str,
         start_line: int | None = None,
         end_line: int | None = None,
+        current_user_id: int | None = None,
+        session_id: str | None = None,
     ) -> str:
-        p = Path(path)
+        p = _workspace_path(self.name, path, current_user_id, session_id)
         if not p.exists():
-            raise ToolExecutionError(self.name, f"文件不存在: {path}")
+            raise ToolExecutionError(self.name, f"File does not exist: {path}")
         if not p.is_file():
-            raise ToolExecutionError(self.name, f"不是普通文件: {path}")
+            raise ToolExecutionError(self.name, f"Not a regular file: {path}")
+        _ensure_text_file(self.name, p)
 
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -63,25 +120,30 @@ class ReadFileTool(BaseTool):
         total = len(lines)
 
         if start_line is not None or end_line is not None:
-            s = (start_line or 1) - 1
-            e = end_line or total
-            lines = lines[s:e]
-            text = "".join(lines)
-            header = f"# {path}  (lines {s+1}-{min(e, total)} / {total})\n"
+            start = max(0, (start_line or 1) - 1)
+            end = min(end_line or total, total)
+            if end < start:
+                raise ToolExecutionError(self.name, "end_line must be greater than or equal to start_line")
+            text = "".join(lines[start:end])
+            header = f"# {p}  (lines {start + 1}-{end} / {total})\n"
         else:
-            header = f"# {path}  ({total} lines)\n"
+            header = f"# {p}  ({total} lines)\n"
 
-        if len(text) > MAX_FILE_CHARS:
-            text = text[:MAX_FILE_CHARS] + f"\n…[已截断，文件共 {len(text)} 字符]…"
+        original_len = len(text)
+        if original_len > MAX_FILE_CHARS:
+            text = (
+                text[:MAX_FILE_CHARS]
+                + f"\n...[truncated, selected content has {original_len} chars]..."
+            )
 
         return header + text
 
 
 class WriteFileTool(BaseTool):
-    """写入文件内容（覆盖模式），自动创建父目录"""
+    """Write a text file in overwrite mode, creating parent directories."""
 
     name = "write_file"
-    description = "将内容写入文件，若文件不存在则创建，若存在则覆盖。"
+    description = "Write text content to a file. Creates parent directories. Overwrites existing files."
 
     def schema(self) -> ToolSchema:
         return ToolSchema(
@@ -90,30 +152,95 @@ class WriteFileTool(BaseTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "目标文件路径"},
-                    "content": {"type": "string", "description": "写入内容"},
+                    "path": {"type": "string", "description": "Target file path"},
+                    "content": {"type": "string", "description": "Text content to write"},
                 },
                 "required": ["path", "content"],
             },
         )
 
-    async def execute(self, path: str, content: str) -> str:
-        p = Path(path)
+    async def execute(
+        self,
+        path: str,
+        content: str,
+        current_user_id: int | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        p = _workspace_path(self.name, path, current_user_id, session_id)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         except Exception as exc:
             raise ToolExecutionError(self.name, str(exc), cause=exc) from exc
-        return f"已成功写入 {p} ({len(content)} 字符)"
+        return f"Successfully wrote {p} ({len(content)} chars)"
 
 
 class StrReplaceTool(BaseTool):
-    """精确字符串替换工具 —— 对标 Claude Code 的 str_replace_based_edit_tool"""
+    """Precise single string replacement tool."""
 
     name = "str_replace"
+    description = "Replace one unique string in a text file. old_str must be non-empty and appear exactly once."
+
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "old_str": {
+                        "type": "string",
+                        "description": "Original string. Must be unique and non-empty.",
+                    },
+                    "new_str": {"type": "string", "description": "Replacement string"},
+                },
+                "required": ["path", "old_str", "new_str"],
+            },
+        )
+
+    async def execute(
+        self,
+        path: str,
+        old_str: str,
+        new_str: str,
+        current_user_id: int | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        if old_str == "":
+            raise ToolExecutionError(self.name, "old_str cannot be empty")
+
+        p = _workspace_path(self.name, path, current_user_id, session_id)
+        if not p.exists():
+            raise ToolExecutionError(self.name, f"File does not exist: {path}")
+        if not p.is_file():
+            raise ToolExecutionError(self.name, f"Not a regular file: {path}")
+        _ensure_text_file(self.name, p)
+
+        original = p.read_text(encoding="utf-8", errors="replace")
+        count = original.count(old_str)
+
+        if count == 0:
+            raise ToolExecutionError(self.name, f"Target string was not found in {path}")
+        if count > 1:
+            raise ToolExecutionError(
+                self.name,
+                f"Found {count} matches in {path}; old_str must be unique. Provide more context.",
+            )
+
+        updated = original.replace(old_str, new_str, 1)
+        p.write_text(updated, encoding="utf-8")
+        return f"Replacement succeeded: {path}"
+
+
+class EditFileTool(BaseTool):
+    """Apply multiple ordered string patches to a text file."""
+
+    name = "edit_file"
     description = (
-        "在文件中精确查找并替换字符串。"
-        "old_str 必须在文件中唯一存在，否则拒绝执行。"
+        "Apply multiple ordered text patches to a file. Each patch has old_str and new_str. "
+        "Every old_str must be non-empty and unique in the current file content at the moment it is applied. "
+        "Use this for multi-location edits instead of many separate str_replace calls."
     )
 
     def schema(self) -> ToolSchema:
@@ -123,40 +250,91 @@ class StrReplaceTool(BaseTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件路径"},
-                    "old_str": {"type": "string", "description": "要替换的原始字符串（必须唯一）"},
-                    "new_str": {"type": "string", "description": "替换后的新字符串"},
+                    "path": {"type": "string", "description": "File path"},
+                    "patches": {
+                        "type": "array",
+                        "description": "Ordered list of string replacement patches.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_str": {
+                                    "type": "string",
+                                    "description": "Existing text to replace. Must be unique.",
+                                },
+                                "new_str": {
+                                    "type": "string",
+                                    "description": "Replacement text.",
+                                },
+                            },
+                            "required": ["old_str", "new_str"],
+                        },
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, validate patches without writing the file.",
+                        "default": False,
+                    },
                 },
-                "required": ["path", "old_str", "new_str"],
+                "required": ["path", "patches"],
             },
         )
 
-    async def execute(self, path: str, old_str: str, new_str: str) -> str:
-        p = Path(path)
+    async def execute(
+        self,
+        path: str,
+        patches: list[dict[str, Any]],
+        dry_run: bool = False,
+        current_user_id: int | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        p = _workspace_path(self.name, path, current_user_id, session_id)
         if not p.exists():
-            raise ToolExecutionError(self.name, f"文件不存在: {path}")
+            raise ToolExecutionError(self.name, f"File does not exist: {path}")
+        if not p.is_file():
+            raise ToolExecutionError(self.name, f"Not a regular file: {path}")
+        _ensure_text_file(self.name, p)
+
+        if not patches:
+            raise ToolExecutionError(self.name, "patches cannot be empty")
 
         original = p.read_text(encoding="utf-8", errors="replace")
-        count = original.count(old_str)
+        updated = original
+        applied: list[str] = []
 
-        if count == 0:
-            raise ToolExecutionError(self.name, f"在 {path} 中找不到目标字符串")
-        if count > 1:
-            raise ToolExecutionError(
-                self.name,
-                f"在 {path} 中找到 {count} 处匹配，old_str 必须唯一。请提供更多上下文。",
-            )
+        for index, patch in enumerate(patches, start=1):
+            old_str = str(patch.get("old_str", ""))
+            new_str = str(patch.get("new_str", ""))
+            if old_str == "":
+                raise ToolExecutionError(self.name, f"Patch {index}: old_str cannot be empty")
 
-        updated = original.replace(old_str, new_str, 1)
-        p.write_text(updated, encoding="utf-8")
-        return f"替换成功: {path}"
+            count = updated.count(old_str)
+            if count == 0:
+                raise ToolExecutionError(self.name, f"Patch {index}: target string was not found")
+            if count > 1:
+                raise ToolExecutionError(
+                    self.name,
+                    f"Patch {index}: found {count} matches; old_str must be unique",
+                )
+
+            updated = updated.replace(old_str, new_str, 1)
+            applied.append(f"patch {index}: {len(old_str)} -> {len(new_str)} chars")
+
+        if updated == original:
+            return f"No changes needed for {path}"
+
+        if not dry_run:
+            p.write_text(updated, encoding="utf-8")
+
+        action = "validated" if dry_run else "applied"
+        delta = len(updated) - len(original)
+        return f"Successfully {action} {len(patches)} patch(es) for {path}; char delta {delta}.\n" + "\n".join(applied)
 
 
 class ListDirTool(BaseTool):
-    """列出目录内容"""
+    """List a directory non-recursively."""
 
     name = "list_dir"
-    description = "列出目录下的文件和子目录（非递归）。"
+    description = "List files and child directories in a directory, non-recursively."
 
     def schema(self) -> ToolSchema:
         return ToolSchema(
@@ -167,7 +345,7 @@ class ListDirTool(BaseTool):
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "目录路径（默认为当前目录）",
+                        "description": "Directory path. Defaults to current directory.",
                         "default": ".",
                     },
                 },
@@ -175,14 +353,19 @@ class ListDirTool(BaseTool):
             },
         )
 
-    async def execute(self, path: str = ".") -> str:
-        p = Path(path)
+    async def execute(
+        self,
+        path: str = ".",
+        current_user_id: int | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        p = _workspace_path(self.name, path, current_user_id, session_id)
         if not p.exists():
-            raise ToolExecutionError(self.name, f"目录不存在: {path}")
+            raise ToolExecutionError(self.name, f"Directory does not exist: {path}")
         if not p.is_dir():
-            raise ToolExecutionError(self.name, f"不是目录: {path}")
+            raise ToolExecutionError(self.name, f"Not a directory: {path}")
 
-        entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name))
+        entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
         lines = []
         for entry in entries:
             if entry.is_dir():
@@ -191,14 +374,14 @@ class ListDirTool(BaseTool):
                 size = entry.stat().st_size
                 lines.append(f"  [FILE] {entry.name}  ({size} bytes)")
 
-        return f"{path}/\n" + "\n".join(lines) if lines else f"{path}/ (空目录)"
+        return f"{p}/\n" + "\n".join(lines) if lines else f"{p}/ (empty)"
 
 
 class GlobSearchTool(BaseTool):
-    """使用 Glob 模式搜索文件"""
+    """Search file paths with pathlib glob patterns."""
 
     name = "glob_search"
-    description = "用 Glob 模式在指定目录内搜索文件路径。"
+    description = "Search file paths under a base directory with glob patterns such as **/*.py."
 
     def schema(self) -> ToolSchema:
         return ToolSchema(
@@ -209,25 +392,44 @@ class GlobSearchTool(BaseTool):
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Glob 模式，例如 **/*.py",
+                        "description": "Glob pattern, e.g. **/*.py",
                     },
                     "base_dir": {
                         "type": "string",
-                        "description": "搜索根目录（默认当前目录）",
+                        "description": "Search root directory. Defaults to current directory.",
                         "default": ".",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results. Defaults to 200, capped at 1000.",
+                        "default": 200,
                     },
                 },
                 "required": ["pattern"],
             },
         )
 
-    async def execute(self, pattern: str, base_dir: str = ".") -> str:
-        base = Path(base_dir)
+    async def execute(
+        self,
+        pattern: str,
+        base_dir: str = ".",
+        max_results: int = 200,
+        current_user_id: int | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        base = _workspace_path(self.name, base_dir, current_user_id, session_id)
+        if not base.exists():
+            raise ToolExecutionError(self.name, f"Search directory does not exist: {base_dir}")
+        if not base.is_dir():
+            raise ToolExecutionError(self.name, f"Not a directory: {base_dir}")
+
         matches = sorted(base.glob(pattern))
         if not matches:
-            return f"未找到匹配 {pattern!r} 的文件"
-        lines = [str(m.relative_to(base)) for m in matches[:200]]
+            return f"No files matched {pattern!r}"
+
+        limit = max(1, min(int(max_results or 200), 1000))
+        lines = [str(m.relative_to(base)) for m in matches[:limit]]
         result = "\n".join(lines)
-        if len(matches) > 200:
-            result += f"\n…（共 {len(matches)} 个，只显示前 200 个）"
+        if len(matches) > limit:
+            result += f"\n...({len(matches)} total, showing first {limit})"
         return result

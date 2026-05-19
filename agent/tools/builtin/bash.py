@@ -1,41 +1,44 @@
-"""
-BashTool —— 在受控沙箱中执行 Shell 命令
-对标 Claude Code 的 Bash tool，包含超时、输出截断和安全拦截
-"""
+"""Cross-platform shell command execution tool."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import shlex
+import re
 import sys
-from typing import Any
+
+from backend.permission_service import create_permission_request, summarize_delete_command
+from backend.workspace import resolve_workspace_path, session_workspace_root
 
 from ..base import BaseTool, ToolExecutionError, ToolSchema
 
-# 危险命令黑名单（生产环境应更完善）
 _BLOCKED_PATTERNS = [
     "rm -rf /",
+    "rm -rf /*",
     "mkfs",
-    ":(){:|:&};:",   # fork 炸弹
+    ":(){:|:&};:",
     "dd if=/dev/zero",
+    "remove-item -recurse -force c:\\",
+    "del /s /q c:\\",
 ]
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w.-])(?:[A-Za-z]:\\[^ \t;&|<>`'\"]*|/[^ \t;&|<>`'\"]*)"
+)
+_PARENT_TRAVERSAL_RE = re.compile(r"(?<![\w.-])\.\.(?:[\\/]|$)")
 
-DEFAULT_TIMEOUT = 30  # 秒
-MAX_OUTPUT_CHARS = 8_000  # 输出截断阈值
+DEFAULT_TIMEOUT = 30
+MAX_OUTPUT_CHARS = 8_000
 
 
 class BashTool(BaseTool):
-    """
-    执行 Shell 命令并返回 stdout + stderr。
-    超时默认 30 秒，输出超长自动截断。
-    """
+    """Execute a command in the system shell and return stdout, stderr, and exit code."""
 
     name = "bash"
     description = (
-        "在系统 Shell 中执行命令，返回 stdout 和 stderr。"
-        "适合文件操作、代码运行、包管理等场景。"
-        "禁止执行破坏性命令。"
+        "Run a command in the system shell and return stdout/stderr. "
+        "Windows defaults to PowerShell; Linux/macOS default to sh. "
+        "Deletion commands require explicit user approval in the UI before execution."
     )
 
     def schema(self) -> ToolSchema:
@@ -47,16 +50,22 @@ class BashTool(BaseTool):
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "要执行的 Shell 命令",
+                        "description": "Shell command to execute",
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": f"超时秒数（默认 {DEFAULT_TIMEOUT}）",
+                        "description": f"Timeout in seconds, default {DEFAULT_TIMEOUT}",
                         "default": DEFAULT_TIMEOUT,
                     },
                     "working_dir": {
                         "type": "string",
-                        "description": "工作目录（默认为当前目录）",
+                        "description": "Working directory. Defaults to the current process directory.",
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["auto", "powershell", "cmd", "bash", "sh"],
+                        "description": "Shell to use. auto means PowerShell on Windows and sh on Linux/macOS.",
+                        "default": "auto",
                     },
                 },
                 "required": ["command"],
@@ -68,57 +77,168 @@ class BashTool(BaseTool):
         command: str,
         timeout: int = DEFAULT_TIMEOUT,
         working_dir: str | None = None,
+        shell: str = "auto",
+        current_user_id: int | None = None,
+        session_id: str = "",
     ) -> str:
-        # 安全拦截
-        for pattern in _BLOCKED_PATTERNS:
-            if pattern in command:
-                raise ToolExecutionError(self.name, f"命令包含被拒绝的模式: {pattern!r}")
+        delete_summary = summarize_delete_command(command)
+        if delete_summary:
+            if current_user_id is None:
+                raise ToolExecutionError(
+                    self.name,
+                    "Deletion commands require user approval, but no current_user_id was provided.",
+                )
+            request = create_permission_request(
+                user_id=int(current_user_id),
+                session_id=session_id,
+                tool_name=self.name,
+                action=delete_summary["action"],
+                summary=delete_summary["summary"],
+                target=delete_summary["target"],
+                payload={
+                    "command": command,
+                    "timeout": timeout,
+                    "working_dir": working_dir,
+                    "shell": shell,
+                    "current_user_id": current_user_id,
+                    "session_id": session_id,
+                },
+            )
+            return json.dumps(request, ensure_ascii=False)
 
-        cwd = working_dir or os.getcwd()
+        return await run_shell_command(
+            command=command,
+            timeout=timeout,
+            working_dir=working_dir,
+            shell=shell,
+            current_user_id=current_user_id,
+            session_id=session_id,
+            require_delete_approval=False,
+        )
 
-        # Windows 兼容：使用 cmd /c，Linux/macOS 使用 sh -c
-        if sys.platform == "win32":
-            shell_cmd = ["cmd", "/c", command]
+
+async def run_shell_command(
+    *,
+    command: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    working_dir: str | None = None,
+    shell: str = "auto",
+    current_user_id: int | None = None,
+    session_id: str | None = None,
+    require_delete_approval: bool = True,
+) -> str:
+    if require_delete_approval and summarize_delete_command(command):
+        raise ToolExecutionError("bash", "Deletion commands require user approval.")
+
+    normalized = command.lower()
+    for pattern in _BLOCKED_PATTERNS:
+        if pattern in normalized:
+            raise ToolExecutionError("bash", f"Command contains a blocked pattern: {pattern!r}")
+
+    if current_user_id is None:
+        raise ToolExecutionError("bash", "Missing current_user_id for workspace-isolated shell access.")
+    try:
+        if working_dir:
+            cwd = str(resolve_workspace_path(working_dir, user_id=int(current_user_id), session_id=session_id))
         else:
-            shell_cmd = ["sh", "-c", command]
+            cwd = str(session_workspace_root(int(current_user_id), session_id).resolve())
+    except ValueError as exc:
+        raise ToolExecutionError("bash", str(exc), cause=exc) from exc
 
+    if not os.path.isdir(cwd):
+        raise ToolExecutionError("bash", f"Working directory does not exist or is not a directory: {cwd}")
+    _validate_command_scope(command, cwd)
+
+    shell_cmd = _build_shell_command(command, shell)
+    env = os.environ.copy()
+    env["AGENT_USER_WORKSPACE"] = cwd
+    env["AGENT_CURRENT_USER_ID"] = str(int(current_user_id))
+    env["AGENT_SESSION_ID"] = session_id or ""
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *shell_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *shell_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
             proc.kill()
-            raise ToolExecutionError(self.name, f"命令执行超时（{timeout}s）: {command}")
-        except Exception as exc:
-            raise ToolExecutionError(self.name, str(exc), cause=exc) from exc
+        except Exception:
+            pass
+        raise ToolExecutionError("bash", f"Command timed out after {timeout}s: {command}") from exc
+    except Exception as exc:
+        raise ToolExecutionError("bash", str(exc), cause=exc) from exc
 
-        out = stdout.decode("utf-8", errors="replace")
-        err = stderr.decode("utf-8", errors="replace")
-        exit_code = proc.returncode
+    out = _decode_output(stdout)
+    err = _decode_output(stderr)
+    exit_code = proc.returncode
 
-        # 拼接输出
-        parts: list[str] = []
-        if out:
-            parts.append(f"<stdout>\n{out}</stdout>")
-        if err:
-            parts.append(f"<stderr>\n{err}</stderr>")
-        parts.append(f"<exit_code>{exit_code}</exit_code>")
+    parts: list[str] = []
+    if out:
+        parts.append(f"<stdout>\n{out}</stdout>")
+    if err:
+        parts.append(f"<stderr>\n{err}</stderr>")
+    parts.append(f"<exit_code>{exit_code}</exit_code>")
 
-        result = "\n".join(parts)
+    result = "\n".join(parts)
+    if len(result) > MAX_OUTPUT_CHARS:
+        half = MAX_OUTPUT_CHARS // 2
+        result = (
+            result[:half]
+            + f"\n\n...[output truncated, total {len(result)} chars]...\n\n"
+            + result[-half:]
+        )
+    return result
 
-        # 截断超长输出
-        if len(result) > MAX_OUTPUT_CHARS:
-            half = MAX_OUTPUT_CHARS // 2
-            result = (
-                result[:half]
-                + f"\n\n…[输出已截断，共 {len(result)} 字符]…\n\n"
-                + result[-half:]
-            )
 
-        return result
+def _build_shell_command(command: str, shell: str) -> list[str]:
+    selected = (shell or "auto").lower()
+    if selected == "auto":
+        selected = "powershell" if sys.platform == "win32" else "sh"
+
+    if selected == "powershell":
+        executable = "powershell" if sys.platform == "win32" else "pwsh"
+        return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+    if selected == "cmd":
+        return ["cmd", "/c", command]
+    if selected == "bash":
+        return ["bash", "-lc", command]
+    if selected == "sh":
+        return ["sh", "-c", command]
+    raise ToolExecutionError("bash", f"Unsupported shell: {shell}")
+
+
+def _validate_command_scope(command: str, cwd: str) -> None:
+    normalized = " ".join(command.split())
+    if _PARENT_TRAVERSAL_RE.search(normalized):
+        raise ToolExecutionError("bash", "Parent-directory traversal is not allowed in workspace commands.")
+
+    for match in _ABSOLUTE_PATH_RE.finditer(normalized):
+        candidate = match.group(0)
+        prefix = normalized[max(0, match.start() - 8):match.start()]
+        if "://" in prefix:
+            continue
+        resolved = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.normcase(resolved).startswith(os.path.normcase(cwd)):
+            continue
+        raise ToolExecutionError(
+            "bash",
+            f"Absolute path escape is not allowed outside the workspace: {candidate}",
+        )
+
+
+def _decode_output(data: bytes) -> str:
+    if not data:
+        return ""
+    for encoding in ("utf-8", "gb18030", "gbk", "cp936"):
+        try:
+            text = data.decode(encoding)
+            if "\ufffd" not in text:
+                return text
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")

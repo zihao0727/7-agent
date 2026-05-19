@@ -15,7 +15,7 @@ class ToolToggleRequest(BaseModel):
 
 @router.get("/tools")
 async def list_tools(current_user: dict = Depends(require_current_user)) -> dict:
-    state = get_app_state()
+    state = get_app_state(int(current_user["id"]))
     return {"tools": state.get_tools_info()}
 
 
@@ -25,7 +25,7 @@ async def toggle_tool(
     body: ToolToggleRequest,
     current_user: dict = Depends(require_current_user),
 ) -> dict:
-    state = get_app_state()
+    state = get_app_state(int(current_user["id"]))
     ok = state.toggle_tool(name, body.enabled)
     if not ok:
         raise HTTPException(status_code=404, detail=f"工具 '{name}' 不存在")

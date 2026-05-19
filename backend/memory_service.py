@@ -16,8 +16,19 @@ from backend.model_routing import is_kimi_route
 
 logger = logging.getLogger(__name__)
 
-MEMORY_KINDS = {"preference", "profile", "project", "instruction", "fact"}
+MEMORY_KINDS = {
+    "preference",
+    "profile",
+    "project",
+    "contact",
+    "format",
+    "taboo",
+    "instruction",
+    "fact",
+}
 ACTIVE_STATUS = "active"
+PENDING_STATUS = "pending"
+VISIBLE_STATUSES = {ACTIVE_STATUS, PENDING_STATUS, "archived"}
 
 
 def _now() -> datetime:
@@ -86,7 +97,7 @@ def _score_memory(memory: dict[str, Any], query_tokens: set[str]) -> float:
 async def list_memories(user_id: int, include_archived: bool = False) -> list[dict[str, Any]]:
     query: dict[str, Any] = {"user_id": user_id}
     if not include_archived:
-        query["status"] = ACTIVE_STATUS
+        query["status"] = {"$in": [ACTIVE_STATUS, PENDING_STATUS]}
     rows = (
         await get_db()["memories"]
         .find(query)
@@ -105,12 +116,16 @@ async def create_memory(
     confidence: float = 0.8,
     source_session_id: str | None = None,
     source_message_ids: list[str] | None = None,
+    status: str = ACTIVE_STATUS,
+    needs_confirmation: bool = False,
 ) -> dict[str, Any]:
     content = _normalize_text(content)
     if not content:
         raise ValueError("Memory content is required")
     if kind not in MEMORY_KINDS:
         kind = "fact"
+    if status not in VISIBLE_STATUSES:
+        status = ACTIVE_STATUS
 
     doc = {
         "_id": str(uuid.uuid4()),
@@ -121,7 +136,8 @@ async def create_memory(
         "source_message_ids": source_message_ids or [],
         "importance": max(0.0, min(1.0, float(importance))),
         "confidence": max(0.0, min(1.0, float(confidence))),
-        "status": ACTIVE_STATUS,
+        "status": status,
+        "needs_confirmation": bool(needs_confirmation or status == PENDING_STATUS),
         "created_at": _now(),
         "updated_at": _now(),
         "last_used_at": None,
@@ -135,12 +151,14 @@ async def update_memory(
     memory_id: str,
     patch: dict[str, Any],
 ) -> dict[str, Any] | None:
-    allowed = {"kind", "content", "importance", "confidence", "status"}
+    allowed = {"kind", "content", "importance", "confidence", "status", "needs_confirmation"}
     update = {key: value for key, value in patch.items() if key in allowed}
     if "kind" in update and update["kind"] not in MEMORY_KINDS:
         update["kind"] = "fact"
     if "content" in update:
         update["content"] = _normalize_text(str(update["content"]))[:1000]
+    if update.get("status") == ACTIVE_STATUS:
+        update["needs_confirmation"] = False
     for key in ("importance", "confidence"):
         if key in update:
             update[key] = max(0.0, min(1.0, float(update[key])))
@@ -160,6 +178,21 @@ async def delete_memory(user_id: int, memory_id: str) -> bool:
         {"$set": {"status": "deleted", "updated_at": _now()}},
     )
     return result.modified_count > 0
+
+
+async def confirm_memory(user_id: int, memory_id: str, approved: bool) -> dict[str, Any] | None:
+    result = await get_db()["memories"].find_one_and_update(
+        {"_id": memory_id, "user_id": user_id},
+        {
+            "$set": {
+                "status": ACTIVE_STATUS if approved else "deleted",
+                "needs_confirmation": False,
+                "updated_at": _now(),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return _serialize_memory(result) if result else None
 
 
 async def retrieve_relevant_memories(
@@ -282,6 +315,8 @@ async def extract_memory_from_session(
         "rules": [
             "Only save durable user-specific information useful in future conversations.",
             "Save explicit 'remember this' requests, stable preferences, ongoing projects, standing instructions, and durable profile facts.",
+            "Classify memories into preference, profile, project, contact, format, taboo, instruction, or fact.",
+            "Important memories, standing instructions, profile/contact details, taboos, and anything that changes future behavior must require confirmation by the application.",
             "Do not save sensitive personal data, secrets, passwords, one-off mood/status, or temporary task details unless the user explicitly asks to remember them.",
             "If an existing memory should change, return operation=update with existing_memory_id.",
             "Return exactly one JSON object.",
@@ -289,7 +324,7 @@ async def extract_memory_from_session(
         "schema": {
             "operation": "create | update | ignore",
             "existing_memory_id": "string or null",
-            "kind": "preference | profile | project | instruction | fact",
+            "kind": "preference | profile | project | contact | format | taboo | instruction | fact",
             "content": "concise memory in Chinese when possible",
             "importance": "0.0-1.0",
             "confidence": "0.0-1.0",
@@ -325,6 +360,8 @@ async def extract_memory_from_session(
     kind = str(parsed.get("kind") or "fact")
     importance = float(parsed.get("importance") or 0.5)
     confidence = float(parsed.get("confidence") or 0.75)
+    needs_confirmation = importance >= 0.75 or kind in {"profile", "contact", "taboo", "instruction"}
+    status = PENDING_STATUS if needs_confirmation else ACTIVE_STATUS
 
     if operation == "update" and parsed.get("existing_memory_id"):
         await update_memory(
@@ -335,7 +372,8 @@ async def extract_memory_from_session(
                 "content": content,
                 "importance": importance,
                 "confidence": confidence,
-                "status": ACTIVE_STATUS,
+                "status": status,
+                "needs_confirmation": needs_confirmation,
             },
         )
         return
@@ -348,4 +386,6 @@ async def extract_memory_from_session(
             importance=importance,
             confidence=confidence,
             source_session_id=session_id,
+            status=status,
+            needs_confirmation=needs_confirmation,
         )

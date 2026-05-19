@@ -16,6 +16,148 @@ from backend.config import get_settings
 
 PROFILE_SAFE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 SECRET_KEYS = {"app_secret", "access_token", "refresh_token", "token"}
+LARK_SHORTCUT_COMMANDS: dict[str, set[str]] = {
+    "base": {
+        "advperm-disable",
+        "advperm-enable",
+        "base-copy",
+        "base-create",
+        "base-get",
+        "dashboard-arrange",
+        "dashboard-block-create",
+        "dashboard-block-delete",
+        "dashboard-block-get",
+        "dashboard-block-list",
+        "dashboard-block-update",
+        "dashboard-create",
+        "dashboard-delete",
+        "dashboard-get",
+        "dashboard-list",
+        "dashboard-update",
+        "data-query",
+        "field-create",
+        "field-delete",
+        "field-get",
+        "field-list",
+        "field-search-options",
+        "field-update",
+        "form-create",
+        "form-delete",
+        "form-get",
+        "form-list",
+        "form-questions-create",
+        "form-questions-delete",
+        "form-questions-list",
+        "form-questions-update",
+        "form-update",
+        "record-batch-create",
+        "record-batch-update",
+        "record-delete",
+        "record-get",
+        "record-history-list",
+        "record-list",
+        "record-search",
+        "record-share-link-create",
+        "record-upload-attachment",
+        "record-upsert",
+        "role-create",
+        "role-delete",
+        "role-get",
+        "role-list",
+        "role-update",
+        "table-create",
+        "table-delete",
+        "table-get",
+        "table-list",
+        "table-update",
+        "view-create",
+        "view-delete",
+        "view-get",
+        "view-list",
+        "view-rename",
+        "workflow-create",
+        "workflow-disable",
+        "workflow-enable",
+        "workflow-get",
+        "workflow-list",
+        "workflow-update",
+    },
+    "calendar": {"agenda", "create", "freebusy", "rsvp", "suggestion"},
+    "contact": {"get-user", "search-user"},
+    "docs": {
+        "create",
+        "fetch",
+        "media-download",
+        "media-insert",
+        "media-preview",
+        "media-upload",
+        "search",
+        "update",
+        "whiteboard-update",
+    },
+    "drive": {
+        "add-comment",
+        "apply-permission",
+        "create-folder",
+        "create-shortcut",
+        "delete",
+        "download",
+        "export",
+        "export-download",
+        "import",
+        "move",
+        "task_result",
+        "upload",
+    },
+    "mail": {
+        "decline-receipt",
+        "draft-create",
+        "draft-edit",
+        "forward",
+        "message",
+        "messages",
+        "reply",
+        "reply-all",
+        "send",
+        "send-receipt",
+        "signature",
+        "thread",
+        "triage",
+        "watch",
+    },
+    "minutes": {"download", "search"},
+    "sheets": {
+        "append",
+        "create",
+        "export",
+        "find",
+        "info",
+        "read",
+        "replace",
+        "write",
+    },
+    "task": {
+        "assign",
+        "comment",
+        "complete",
+        "create",
+        "followers",
+        "get-my-tasks",
+        "get-related-tasks",
+        "reminder",
+        "reopen",
+        "search",
+        "set-ancestor",
+        "subscribe-event",
+        "tasklist-create",
+        "tasklist-members",
+        "tasklist-search",
+        "tasklist-task-add",
+        "update",
+    },
+    "vc": {"notes", "recording", "search"},
+    "wiki": {"delete-space", "move", "node-create"},
+}
 
 
 @dataclass(frozen=True)
@@ -62,15 +204,16 @@ def _redact_text(text: str, account: LarkAccount | None) -> str:
     return text.replace(account.app_secret, "***")
 
 
-def _config_dir() -> Path:
+def _config_dir(user_id: int | None = None) -> Path:
     settings = get_settings()
     configured = os.getenv("LARKSUITE_CLI_CONFIG_DIR") or settings.lark_cli_config_dir
     if configured:
         path = Path(configured)
         if not path.is_absolute():
             path = Path(__file__).resolve().parent.parent / path
-        return path
-    return Path.home() / ".lark-cli"
+        return path if user_id is None else path / f"user_{int(user_id)}"
+    root = Path.home() / ".lark-cli"
+    return root if user_id is None else root / f"user_{int(user_id)}"
 
 
 def _load_multi_app_config(path: Path) -> dict[str, Any]:
@@ -88,8 +231,25 @@ def _load_multi_app_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def _save_profile_with_file_secret(account: LarkAccount) -> dict[str, Any]:
-    config_dir = _config_dir()
+def normalize_lark_command_args(args: list[str]) -> list[str]:
+    normalized = [str(item).strip() for item in args if str(item).strip()]
+    if len(normalized) >= 2:
+        domain = normalized[0]
+        subcommand = normalized[1]
+        if (
+            not subcommand.startswith(("+", "-"))
+            and subcommand in LARK_SHORTCUT_COMMANDS.get(domain, set())
+        ):
+            normalized[1] = f"+{subcommand}"
+    return normalized
+
+
+def _save_profile_with_file_secret(
+    account: LarkAccount,
+    *,
+    users: list[Any] | None = None,
+) -> dict[str, Any]:
+    config_dir = _config_dir(account.user_id)
     secrets_dir = config_dir / "secrets"
     config_dir.mkdir(parents=True, exist_ok=True)
     secrets_dir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +266,7 @@ def _save_profile_with_file_secret(account: LarkAccount) -> dict[str, Any]:
         "appSecret": {"source": "file", "id": str(secret_path)},
         "brand": account.brand,
         "lang": "zh",
-        "users": [],
+        "users": users or [],
     }
 
     replaced = False
@@ -115,7 +275,8 @@ def _save_profile_with_file_secret(account: LarkAccount) -> dict[str, Any]:
             app.get("name") == account.profile_name or app.get("appId") == account.profile_name
         ):
             existing_users = app.get("users") if app.get("appId") == account.app_id else []
-            profile["users"] = existing_users if isinstance(existing_users, list) else []
+            if not users:
+                profile["users"] = existing_users if isinstance(existing_users, list) else []
             apps[idx] = profile
             replaced = True
             break
@@ -136,6 +297,31 @@ def _save_profile_with_file_secret(account: LarkAccount) -> dict[str, Any]:
     }
 
 
+def _find_profile(config: dict[str, Any], account: LarkAccount) -> dict[str, Any] | None:
+    for app in config.get("apps", []):
+        if not isinstance(app, dict):
+            continue
+        if app.get("name") == account.profile_name or app.get("appId") == account.app_id:
+            return app
+    return None
+
+
+def ensure_lark_cli_profile(account: LarkAccount) -> None:
+    user_config_dir = _config_dir(account.user_id)
+    user_config_path = user_config_dir / "config.json"
+    user_config = _load_multi_app_config(user_config_path)
+    if _find_profile(user_config, account):
+        return
+
+    root_config_path = _config_dir(None) / "config.json"
+    root_profile = None
+    if root_config_path.resolve() != user_config_path.resolve():
+        root_profile = _find_profile(_load_multi_app_config(root_config_path), account)
+
+    users = root_profile.get("users") if isinstance(root_profile, dict) else None
+    _save_profile_with_file_secret(account, users=users if isinstance(users, list) else None)
+
+
 async def _run_lark_cli(
     args: list[str],
     *,
@@ -145,7 +331,8 @@ async def _run_lark_cli(
 ) -> dict[str, Any]:
     settings = get_settings()
     env = os.environ.copy()
-    env["LARKSUITE_CLI_CONFIG_DIR"] = str(_config_dir())
+    env["LARKSUITE_CLI_CONFIG_DIR"] = str(_config_dir(account.user_id if account else None))
+    env["LARK_CLI_NO_PROXY"] = "1"
     command = settings.lark_cli_binary
     exec_args = [command, *args]
     if os.name == "nt" and command.lower().endswith((".cmd", ".bat")):
@@ -367,6 +554,7 @@ async def lark_auth_login(
     scopes: list[str] | None = None,
     no_wait: bool = True,
 ) -> dict[str, Any]:
+    ensure_lark_cli_profile(account)
     args = [*account_cli_prefix(account), "auth", "login"]
     if recommend:
         args.append("--recommend")
@@ -383,6 +571,7 @@ async def lark_auth_complete(account: LarkAccount, device_code: str) -> dict[str
     code = (device_code or "").strip()
     if not code:
         raise HTTPException(status_code=400, detail="device_code 不能为空")
+    ensure_lark_cli_profile(account)
     return await _run_lark_cli(
         [*account_cli_prefix(account), "auth", "login", "--device-code", code, "--json"],
         account=account,
@@ -391,14 +580,26 @@ async def lark_auth_complete(account: LarkAccount, device_code: str) -> dict[str
 
 
 async def lark_auth_status(account: LarkAccount) -> dict[str, Any]:
+    ensure_lark_cli_profile(account)
     return await _run_lark_cli(
-        [*account_cli_prefix(account), "doctor", "--offline"],
+        [*account_cli_prefix(account), "auth", "status"],
         account=account,
     )
 
 
-async def run_lark_command(account: LarkAccount, args: list[str]) -> dict[str, Any]:
+async def run_lark_command(
+    account: LarkAccount,
+    args: list[str],
+    *,
+    add_format: bool = True,
+    stdin: str | None = None,
+) -> dict[str, Any]:
+    ensure_lark_cli_profile(account)
+    cli_args = [*account_cli_prefix(account), *normalize_lark_command_args(args)]
+    if add_format:
+        cli_args.extend(["--format", "json"])
     return await _run_lark_cli(
-        [*account_cli_prefix(account), *args, "--format", "json"],
+        cli_args,
         account=account,
+        stdin=stdin,
     )

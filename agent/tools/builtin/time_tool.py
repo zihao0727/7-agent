@@ -53,9 +53,12 @@ class CurrentTimeTool(BaseTool):
             else:
                 now = datetime.datetime.now()
 
+            weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            weekday = weekday_names[now.weekday()]
+
             # 返回 ISO 格式并包含友好时区信息（若有）
             tzname = now.tzname() if now.tzinfo is not None else "local"
-            return now.isoformat() + f" ({tzname})"
+            return now.isoformat() + f" ({tzname}, weekday={weekday})"
 
         except ToolExecutionError:
             raise

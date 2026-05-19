@@ -36,6 +36,14 @@ async def connect_db() -> None:
     await memories_coll.create_index([("user_id", 1), ("kind", 1), ("status", 1)])
     await memories_coll.create_index([("user_id", 1), ("updated_at", -1)])
 
+    knowledge_docs = _db["knowledge_documents"]
+    await knowledge_docs.create_index([("user_id", 1), ("status", 1), ("updated_at", -1)])
+    await knowledge_docs.create_index([("user_id", 1), ("source_type", 1)])
+
+    knowledge_chunks = _db["knowledge_chunks"]
+    await knowledge_chunks.create_index([("user_id", 1), ("document_id", 1)])
+    await knowledge_chunks.create_index([("user_id", 1), ("tokens", 1)])
+
     logger.info("MongoDB connected: %s", settings.mongodb_db)
 
 

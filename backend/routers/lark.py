@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.auth_dependencies import require_current_user
@@ -14,10 +14,12 @@ from backend.lark_service import (
     lark_auth_login,
     lark_auth_status,
     list_lark_accounts,
+    run_lark_command,
     upsert_lark_account,
 )
 
 router = APIRouter(tags=["lark"])
+USER_IDENTITY_DOMAINS = {"calendar", "contact", "mail", "minutes", "task", "vc"}
 
 
 class LarkAccountPayload(BaseModel):
@@ -38,6 +40,12 @@ class LarkAuthLoginPayload(BaseModel):
 
 class LarkAuthCompletePayload(BaseModel):
     device_code: str
+
+
+class LarkCommandPayload(BaseModel):
+    command: list[str] = Field(min_length=1)
+    identity: str = Field(default="auto", pattern="^(bot|user|auto)$")
+    add_format: bool = True
 
 
 @router.get("/lark/accounts")
@@ -111,3 +119,23 @@ async def auth_complete(
 ) -> dict[str, Any]:
     account = await get_lark_account(int(current_user["id"]), account_id)
     return await lark_auth_complete(account, payload.device_code)
+
+
+@router.post("/lark/accounts/{account_id}/command")
+async def run_command(
+    account_id: int,
+    payload: LarkCommandPayload,
+    current_user: dict = Depends(require_current_user),
+) -> dict[str, Any]:
+    account = await get_lark_account(int(current_user["id"]), account_id)
+    args = [str(item).strip() for item in payload.command if str(item).strip()]
+    if not args:
+        raise HTTPException(status_code=400, detail="command cannot be empty")
+    if "--as" not in args:
+        if payload.identity != "auto":
+            args.extend(["--as", payload.identity])
+        elif args[0] in USER_IDENTITY_DOMAINS:
+            args.extend(["--as", "user"])
+    if payload.add_format and "--format" not in args:
+        args.extend(["--format", "json"])
+    return await run_lark_command(account, args, add_format=False)

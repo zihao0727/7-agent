@@ -12,6 +12,8 @@ router = APIRouter(prefix="/code", tags=["code"])
 
 class CodeResultsResponse(BaseModel):
     session_id: str
+    user_id: int
+    namespace: str
     results: list[dict]
 
 
@@ -19,10 +21,13 @@ class CodeResultsResponse(BaseModel):
 async def get_results(
     session_id: str, current_user: dict = Depends(require_current_user)
 ) -> CodeResultsResponse:
-    await assert_session_owned(session_id, current_user["id"])
+    user_id = int(current_user["id"])
+    await assert_session_owned(session_id, user_id)
     return CodeResultsResponse(
         session_id=session_id,
-        results=get_code_results(session_id),
+        user_id=user_id,
+        namespace=f"user:{user_id}:session:{session_id}",
+        results=get_code_results(session_id, user_id),
     )
 
 
@@ -30,6 +35,7 @@ async def get_results(
 async def clear_results(
     session_id: str, current_user: dict = Depends(require_current_user)
 ) -> dict:
-    await assert_session_owned(session_id, current_user["id"])
-    clear_code_results(session_id)
+    user_id = int(current_user["id"])
+    await assert_session_owned(session_id, user_id)
+    clear_code_results(session_id, user_id)
     return {"ok": True}

@@ -19,6 +19,7 @@ if sys.platform == "win32":
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # 确保项目根目录在 Python 路径中，以便 import agent/
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -26,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.auth_db import connect_auth_db, disconnect_auth_db
 from backend.config import get_settings
 from backend.db import connect_db, disconnect_db
-from backend.routers import auth, browser, chat, code_runner, lark, memories, tools, skills, mcp, sessions
+from backend.routers import auth, browser, chat, code_runner, knowledge, lark, memories, permissions, scheduled_tasks, tools, skills, mcp, sessions
+from backend.scheduled_tasks import scheduled_task_service
 from backend.state import get_app_state
 
 logging.basicConfig(
@@ -35,6 +37,7 @@ logging.basicConfig(
 )
 
 settings = get_settings()
+_browser_cleanup_task: asyncio.Task[None] | None = None
 
 app = FastAPI(
     title="Claude-Code Style Agent API",
@@ -60,9 +63,16 @@ app.include_router(skills.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(memories.router, prefix="/api")
+app.include_router(knowledge.router, prefix="/api")
 app.include_router(browser.router, prefix="/api")
 app.include_router(code_runner.router, prefix="/api")
 app.include_router(lark.router, prefix="/api")
+app.include_router(scheduled_tasks.router, prefix="/api")
+app.include_router(permissions.router, prefix="/api")
+
+generated_dir = Path(__file__).resolve().parent.parent / "data" / "generated"
+generated_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/generated", StaticFiles(directory=str(generated_dir)), name="generated")
 
 
 @app.on_event("startup")
@@ -80,10 +90,38 @@ async def startup():
     from agent.tools.builtin.browser_tools import init_browser_manager
     init_browser_manager()
 
+    async def _browser_cleanup_loop() -> None:
+        from agent.tools.builtin.browser_tools import get_browser_manager
+
+        while True:
+            try:
+                await asyncio.sleep(300)
+                await get_browser_manager().cleanup_idle_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Browser cleanup loop failed: %s", exc)
+
+    global _browser_cleanup_task
+    _browser_cleanup_task = asyncio.create_task(_browser_cleanup_loop(), name="browser-cleanup-loop")
+
+    try:
+        await scheduled_task_service.start()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Redis 定时任务服务启动失败: %s", exc)
+
 
 @app.on_event("shutdown")
 async def shutdown():
     """应用关闭时清理"""
+    global _browser_cleanup_task
+    if _browser_cleanup_task:
+        _browser_cleanup_task.cancel()
+        try:
+            await _browser_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        _browser_cleanup_task = None
     await disconnect_db()
     await disconnect_auth_db()
     # 关闭所有 Playwright 浏览器会话
@@ -92,6 +130,7 @@ async def shutdown():
         await get_browser_manager().cleanup()
     except Exception:
         pass
+    await scheduled_task_service.stop()
 
 
 @app.get("/api/health")

@@ -1,7 +1,10 @@
 # ============================================
 # Python 后端 - 必须忽略
 # ============================================
-
+.claude
+.cursor
+.vscode
+.skill-studio-exports
 # Python 缓存文件
 __pycache__/
 *.py[cod]

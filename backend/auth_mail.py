@@ -12,17 +12,24 @@ from dotenv import dotenv_values
 _DOTENV = dotenv_values(Path(__file__).resolve().parent.parent / ".env")
 
 
-def _config_value(key: str, default: str) -> str:
+def _config_value(key: str, default: str | None = None) -> str | None:
     value = _DOTENV.get(key)
     if value not in (None, ""):
         return str(value)
     return os.getenv(key, default)
 
 
+def _required_config_value(key: str) -> str:
+    value = _config_value(key)
+    if value not in (None, ""):
+        return value
+    raise EmailDeliveryError(f"missing required SMTP setting: {key}")
+
+
 SMTP_HOST = _config_value("SMTP_HOST", "smtp.exmail.qq.com")
 SMTP_PORT = int(_config_value("SMTP_PORT", "465"))
-SMTP_SENDER = _config_value("SMTP_SENDER", "zhaozihao@wygzc.cn")
-SMTP_PASSWORD = _config_value("SMTP_PASSWORD", "J9sTFDQZcnaHgwDN")
+SMTP_SENDER = _config_value("SMTP_SENDER", "")
+SMTP_PASSWORD = _config_value("SMTP_PASSWORD", "")
 SMTP_SUBJECT = _config_value("SMTP_SUBJECT", "SevnX平台注册验证码")
 SMTP_TIMEOUT = float(_config_value("SMTP_TIMEOUT", "15"))
 
@@ -34,8 +41,11 @@ class EmailDeliveryError(RuntimeError):
 
 
 def _send_register_code_sync(email: str, code: str) -> None:
+    smtp_sender = _required_config_value("SMTP_SENDER")
+    smtp_password = _required_config_value("SMTP_PASSWORD")
+
     message = EmailMessage()
-    message["From"] = SMTP_SENDER
+    message["From"] = smtp_sender
     message["To"] = email
     message["Subject"] = SMTP_SUBJECT
     message.set_content(
@@ -66,14 +76,14 @@ def _send_register_code_sync(email: str, code: str) -> None:
 
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as server:
-            server.login(SMTP_SENDER, SMTP_PASSWORD)
+            server.login(smtp_sender, smtp_password)
             server.send_message(message)
     except (TimeoutError, OSError, smtplib.SMTPException) as exc:
         logger.warning(
             "Failed to send register code email via SMTP host=%s port=%s sender=%s: %s",
             SMTP_HOST,
             SMTP_PORT,
-            SMTP_SENDER,
+            smtp_sender,
             exc,
         )
         raise EmailDeliveryError("register code email delivery failed") from exc

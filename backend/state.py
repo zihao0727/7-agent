@@ -20,7 +20,9 @@ from agent.skills.browser_skill import BrowserSkill
 from agent.skills.code_runner_skill import CodeRunnerSkill
 from agent.skills.lark_skill import LarkSkill
 from agent.skills.knowledge_base_skill import KnowledgeBaseSkill
+from agent.skills.notary_business_analysis import NotaryBusinessAnalysisSkill
 from agent.skills.pdf2zh_translator import Pdf2zhTranslatorSkill
+from agent.skills.skill_creator_skill import SkillCreatorSkill
 from agent.skills.stock_quote_skill import StockQuoteSkill
 from agent.skills.text_to_image_skill import TextToImageSkill
 from agent.skills.wechat_send_skill import WechatSendSkill
@@ -38,11 +40,13 @@ SKILL_PERMISSION_ALIASES = {
     "code_runner": "code_runner_skill",
     "lark": "lark",
     "pdf_layout_translator": "pdf2zh_translator",
+    "skill_creator": "skill_creator",
     "stock_quote": "stock_quote_skill",
     "text_to_image": "text_to_image_skill",
     "wechat_send": "wechat_send_skill",
     "word_to_pdf": "word_to_pdf_skill",
     "knowledge_base": "knowledge_base_skill",
+    "notary_business_analysis": "notary_business_analysis",
 }
 
 _STATE_LOCK = threading.Lock()
@@ -126,6 +130,18 @@ SKILL_PERMISSION_PROFILES: dict[str, dict[str, Any]] = {
         "access": ["MongoDB 文档库", "用户上传文件", "已保存会话"],
         "risk_level": "medium",
         "requires_confirmation_for": ["索引敏感文件", "删除知识库文档"],
+    },
+    "notary_business_analysis": {
+        "capabilities": ["调用公证业务统计接口", "生成 Markdown 经营分析报告", "汇总办证、收费、KPI、业务结构和人员排名"],
+        "access": ["外部 app4 统计接口", "本地 data/reports/notary_business 输出目录"],
+        "risk_level": "medium",
+        "requires_confirmation_for": ["传入认证请求头", "写入自定义输出目录"],
+    },
+    "skill_creator": {
+        "capabilities": ["设计新技能", "整理技能结构", "生成技能编写建议"],
+        "access": ["当前会话上下文"],
+        "risk_level": "low",
+        "requires_confirmation_for": ["无"],
     },
 }
 
@@ -218,6 +234,8 @@ class AppState:
             KnowledgeBaseSkill(),
             LarkSkill(),
             Pdf2zhTranslatorSkill(),
+            NotaryBusinessAnalysisSkill(),
+            SkillCreatorSkill(),
             StockQuoteSkill(),
             TextToImageSkill(),
         ]

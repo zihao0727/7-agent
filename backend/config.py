@@ -17,6 +17,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    app_env: str = "development"
+    credential_encryption_key: str = ""
+
     # DeepSeek / OpenAI 兼容接口
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -29,6 +32,11 @@ class Settings(BaseSettings):
     kimi_base_url: str = "https://api.moonshot.cn/v1"
     kimi_model: str = "kimi-k2.6"
 
+    # SevnX API (OpenAI 兼容接口)
+    sevnx_api_key: str = ""
+    sevnx_base_url: str = "https://www.sevnx.one/v1"
+    sevnx_model: str = "gpt-5.5"
+
     # Tavily 搜索 API
     tavily_api_key: str = ""
 
@@ -36,6 +44,8 @@ class Settings(BaseSettings):
     lark_cli_binary: str = "lark-cli"
     lark_cli_timeout_seconds: int = 60
     lark_cli_config_dir: str = "data/lark-cli-config"
+    lark_execution_mode: str = "client"
+    client_runtime_timeout_seconds: int = 120
 
     # MongoDB 数据库
     mongodb_url: str = "mongodb://localhost:27017"
@@ -114,7 +124,11 @@ class Settings(BaseSettings):
 """.strip()
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:7878", "http://127.0.0.1:7878"]
+    cors_origins: list[str] = [
+        "http://localhost:7878",
+        "http://127.0.0.1:7878",
+        "app://agent7",
+    ]
 
 @lru_cache
 def get_settings() -> Settings:

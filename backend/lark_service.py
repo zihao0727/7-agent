@@ -13,6 +13,7 @@ from pymysql.cursors import DictCursor
 
 from backend.auth_db import get_auth_conn
 from backend.config import get_settings
+from backend.secret_store import decrypt_secret, encrypt_secret
 
 PROFILE_SAFE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 SECRET_KEYS = {"app_secret", "access_token", "refresh_token", "token"}
@@ -256,6 +257,10 @@ def _save_profile_with_file_secret(
 
     secret_path = secrets_dir / f"{account.profile_name}.secret"
     secret_path.write_text(account.app_secret, encoding="utf-8")
+    try:
+        secret_path.chmod(0o600)
+    except OSError:
+        pass
 
     config_path = config_dir / "config.json"
     config = _load_multi_app_config(config_path)
@@ -287,6 +292,10 @@ def _save_profile_with_file_secret(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        pass
     return {
         "ok": True,
         "fallback": "file-secret-reference",
@@ -307,6 +316,8 @@ def _find_profile(config: dict[str, Any], account: LarkAccount) -> dict[str, Any
 
 
 def ensure_lark_cli_profile(account: LarkAccount) -> None:
+    if get_settings().lark_execution_mode == "client":
+        return
     user_config_dir = _config_dir(account.user_id)
     user_config_path = user_config_dir / "config.json"
     user_config = _load_multi_app_config(user_config_path)
@@ -330,6 +341,48 @@ async def _run_lark_cli(
     timeout: int | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
+    if settings.lark_execution_mode == "client":
+        if account is None:
+            raise HTTPException(status_code=500, detail="Lark client execution requires an account")
+        from backend.client_runtime import ClientRuntimeUnavailable, client_runtime_broker
+
+        try:
+            result = await client_runtime_broker.execute(
+                user_id=account.user_id,
+                capability="lark-cli",
+                payload={
+                    "account": {
+                        "profile_name": account.profile_name,
+                        "app_id": account.app_id,
+                        "app_secret": account.app_secret,
+                        "brand": account.brand,
+                    },
+                    "args": args,
+                    "stdin": stdin,
+                    "timeout_seconds": timeout or settings.lark_cli_timeout_seconds,
+                },
+                timeout_seconds=timeout or settings.client_runtime_timeout_seconds,
+            )
+        except ClientRuntimeUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"当前用户的桌面客户端不可用：{exc}",
+            ) from exc
+
+        stdout = _redact_text(str(result.get("stdout") or ""), account)
+        stderr = _redact_text(str(result.get("stderr") or ""), account)
+        exit_code = int(result.get("exit_code") or 0)
+        payload = {
+            "ok": bool(result.get("ok", exit_code == 0)),
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "data": _parse_json_or_text(stdout, stderr),
+        }
+        if not payload["ok"]:
+            raise HTTPException(status_code=502, detail=payload)
+        return payload
+
     env = os.environ.copy()
     env["LARKSUITE_CLI_CONFIG_DIR"] = str(_config_dir(account.user_id if account else None))
     env["LARK_CLI_NO_PROXY"] = "1"
@@ -432,7 +485,7 @@ async def get_lark_account(user_id: int, account_id: int | None = None) -> LarkA
         user_id=int(row["user_id"]),
         name=row["name"],
         app_id=row["app_id"],
-        app_secret=row["app_secret"],
+        app_secret=decrypt_secret(row["app_secret"]),
         brand=row["brand"],
         profile_name=row["profile_name"],
         is_default=bool(row["is_default"]),
@@ -479,7 +532,7 @@ async def upsert_lark_account(
                     user_id,
                     clean_name,
                     app_id.strip(),
-                    app_secret.strip(),
+                    encrypt_secret(app_secret.strip()),
                     clean_brand,
                     profile_name,
                     1 if make_default else 0,

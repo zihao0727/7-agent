@@ -195,9 +195,21 @@ async def resolve_permission_request(
     with _requests_lock:
         _save_requests_locked()
     if not approved:
+        action = str(item.get("action") or "")
+        if action == "delete_files":
+            denied_text = "用户已拒绝执行该删除操作。"
+        elif action == "read_external_file":
+            denied_text = "用户已拒绝读取该工作区外文件。"
+        elif action == "external_shell_write":
+            denied_text = "用户已拒绝执行该写入操作。"
+        elif action == "tool_call":
+            tool_name = str(item.get("tool_name") or "工具")
+            denied_text = f"用户已拒绝执行 {tool_name}。"
+        else:
+            denied_text = "用户已拒绝执行该操作。"
         return {
             **public_permission_request(item),
-            "result": "用户已拒绝执行该删除操作。",
+            "result": denied_text,
         }
 
     try:
@@ -231,6 +243,18 @@ async def execute_permission_payload(item: dict[str, Any]) -> str:
         args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
         result = await get_app_state(user_id).tool_registry.execute(tool_name, args)
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+    if payload.get("kind") == "read_external":
+        # 用户已在 UI 批准对工作区外白名单文件的读取。
+        # read_external_file_approved 内部会再次校验白名单，防止 payload 被篡改
+        # 或白名单收紧后旧请求漏读。LLM 没有任何途径直接调用该函数。
+        from agent.tools.builtin.file_ops import read_external_file_approved
+
+        return await read_external_file_approved(
+            path=str(payload.get("path") or ""),
+            start_line=payload.get("start_line"),
+            end_line=payload.get("end_line"),
+        )
 
     if item.get("tool_name") == "bash":
         from agent.tools.builtin.bash import run_shell_command

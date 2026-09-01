@@ -353,6 +353,8 @@ export function LarkPanel() {
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [authAccountId, setAuthAccountId] = useState<number | null>(null);
+  const [cliStatus, setCliStatus] = useState<DesktopLarkStatus | null>(null);
+  const [cliRefreshing, setCliRefreshing] = useState(false);
   const [form, setForm] = useState({
     name: "default",
     app_id: "",
@@ -379,6 +381,22 @@ export function LarkPanel() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const refreshCli = useCallback(async (force = false) => {
+    const desktopLark = window.agentDesktop?.lark;
+    if (!desktopLark) return;
+    setCliRefreshing(true);
+    try {
+      setCliStatus(force ? await desktopLark.ensureLatest() : await desktopLark.status());
+    } finally {
+      setCliRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!window.agentDesktop) return;
+    void refreshCli(false).then(() => refreshCli(true));
+  }, [refreshCli]);
 
   const handleSave = async () => {
     if (!form.app_id.trim() || !form.app_secret.trim()) {
@@ -516,6 +534,33 @@ export function LarkPanel() {
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
         </button>
       </div>
+
+      {typeof window !== "undefined" && window.agentDesktop && (
+        <div className="flex items-center justify-between gap-3 border-y border-gray-200 py-2 dark:border-gray-800">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-gray-700 dark:text-gray-200">
+              {cliStatus?.installed
+                ? `本机 lark-cli ${cliStatus.version ?? ""}`
+                : cliRefreshing
+                  ? "正在准备本机 lark-cli"
+                  : "本机 lark-cli 尚未就绪"}
+            </div>
+            <div className="mt-0.5 truncate text-xs text-gray-400">
+              {cliStatus?.warning ||
+                (cliStatus?.source === "managed" ? "用户级自动更新版本" : "客户端内置版本")}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshCli(true)}
+            disabled={cliRefreshing}
+            className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:hover:bg-gray-800"
+            title="检查 lark-cli 更新"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${cliRefreshing ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+      )}
 
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div>

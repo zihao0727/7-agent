@@ -39,6 +39,7 @@ SKILL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "stock_quote_skill": ("股票", "行情", "股价", "基金"),
     "archive_download_skill": ("压缩包", "zip", "下载", "打包"),
     "knowledge_base": ("知识库", "文档库", "资料库", "已上传", "索引", "引用来源"),
+    "skill_creator": ("创建技能", "写技能", "设计技能", "skill", "SKILL.md", "agents/openai.yaml"),
 }
 
 

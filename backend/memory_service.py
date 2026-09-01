@@ -12,7 +12,7 @@ from pymongo import ReturnDocument
 
 from backend.config import get_settings
 from backend.db import get_db
-from backend.model_routing import is_kimi_route
+from backend.model_routing import get_model_route
 
 logger = logging.getLogger(__name__)
 
@@ -247,15 +247,11 @@ async def build_memory_context(user_id: int, messages: list[dict[str, Any]]) -> 
     return format_memories_for_prompt(memories)
 
 
-def _make_memory_client(model: str) -> tuple[AsyncOpenAI | None, str]:
-    settings = get_settings()
-    if is_kimi_route(model):
-        if not settings.kimi_api_key:
-            return None, ""
-        return AsyncOpenAI(api_key=settings.kimi_api_key, base_url=settings.kimi_base_url), settings.kimi_model
-    if not settings.deepseek_api_key:
-        return None, ""
-    return AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url), settings.deepseek_model
+def _make_memory_client(model: str) -> tuple[AsyncOpenAI | None, str, str]:
+    route = get_model_route(model)
+    if not route.api_key:
+        return None, "", ""
+    return AsyncOpenAI(api_key=route.api_key, base_url=route.base_url), route.model, route.provider
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -292,7 +288,7 @@ async def extract_memory_from_session(
         return
 
     existing = await list_memories(user_id)
-    client, model_name = _make_memory_client(model)
+    client, model_name, provider = _make_memory_client(model)
     if client is None:
         logger.info("Skipping memory extraction because no API key is configured")
         return
@@ -332,18 +328,23 @@ async def extract_memory_from_session(
     }
 
     try:
-        response = await client.chat.completions.create(
-            model=model_name,
-            messages=[
+        system_prompt = "You are a conservative long-term memory extractor. Return only JSON."
+        memory_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "messages": [
                 {
                     "role": "system",
-                    "content": "You are a conservative long-term memory extractor. Return only JSON.",
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ],
-            temperature=0.1,
-            max_tokens=500,
-        )
+            "temperature": 0.1,
+            "max_tokens": 500,
+        }
+        if provider == "SevnX":
+            memory_kwargs["extra_body"] = {"instructions": system_prompt}
+
+        response = await client.chat.completions.create(**memory_kwargs)
     except Exception as exc:
         logger.warning("Memory extraction failed: %s", exc)
         return

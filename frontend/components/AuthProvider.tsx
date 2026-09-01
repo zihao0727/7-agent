@@ -21,6 +21,7 @@ import {
   registerUser,
   sendRegisterCode,
 } from "@/lib/api";
+import { getApiBaseUrl } from "@/lib/runtime-config";
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -88,6 +89,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener("sevn:auth-expired", handler);
     return () => window.removeEventListener("sevn:auth-expired", handler);
   }, [clearAuth]);
+
+  useEffect(() => {
+    const desktopRuntime = window.agentDesktop?.runtime;
+    if (!desktopRuntime) return;
+    if (accessToken && user) {
+      void desktopRuntime
+        .connect({
+          apiUrl: getApiBaseUrl(),
+          accessToken,
+          userId: user.id,
+        })
+        .catch((error) => console.error("desktop runtime connection failed", error));
+      return;
+    }
+    void desktopRuntime.disconnect().catch(() => undefined);
+  }, [accessToken, user]);
 
   const requestRegisterCode = useCallback(async (email: string) => {
     await sendRegisterCode(email);

@@ -1,36 +1,40 @@
-# ============================================
-# Python 后端 - 必须忽略
-# ============================================
-.claude
-.cursor
-.vscode
-.skill-studio-exports
-data/
-examples/
-test/
-# Python 缓存文件
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+*.cover
+coverage.xml
+nosetests.xml
+.ipynb_checkpoints/
 
-# 虚拟环境（常见命名）
+# Virtual environments and local package caches
+.venv/
 venv/
 env/
 ENV/
-.venv/
-.env/
-.ENV/
+.uv-cache/
 
-# 分发/打包
+# Python build artifacts
 build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -39,98 +43,97 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
-# PyInstaller
 *.manifest
 *.spec
 
-# 测试相关
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
+# Node / frontend dependencies and build output
+node_modules/
+.pnp/
+.pnp.js
+.next/
+out/
+frontend/out/
+dist/
+dist-ssr/
+*.tsbuildinfo
+next-env.d.ts
+.parcel-cache/
+.eslintcache
+.stylelintcache
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# ============================================
-# 环境配置文件 - 敏感信息，绝不能推送
-# ============================================
-
-# 本地环境文件（包含密钥、密码等）
+# Local environment and secrets
 .env
-.env.local
-.env.*.local
+.env.*
 !.env.example
 !.env.local.example
+!.env.*.example
+*.local
 
-# ============================================
-# 数据文件 - 运行时生成，不需要版本控制
-# ============================================
+# Local AI agent, skill, and tool configuration
+.claude/
+.cursor/
+.codex/
+.mcp/
+.mcp.json
+mcp.json
+.skill-studio-exports/
+skills-lock.json
 
-# 上传的文件和聊天记录
+# Local/generated skills that should stay off GitHub
+agent/skills/notary_business_analysis/
+agent/skills/skill_creator_skill/
+
+# Runtime data, uploads, and databases
+data/
 data/chat_uploads/
 data/screenshots/
 *.db
 *.sqlite
 *.sqlite3
 
-# 日志文件
+# Generated reports and exports
+/*_raw.json
+/*报告_*.md
+/*report_*.md
+*.export.*
+
+# Logs and debug output
 *.log
 logs/
 log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# ============================================
-# IDE 和编辑器配置
-# ============================================
-
-# VSCode
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-
-# PyCharm / IntelliJ
+# IDE and editor state
 .idea/
+.vscode/
 *.iml
 *.iws
 *.ipr
-out/
-
-# 其他编辑器
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
 *.swp
 *.swo
+*.sw?
 *~
-.DS_Store
-Thumbs.db
+out/
 
-# ============================================
-# 操作系统文件
-# ============================================
+# OS files
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+Thumbs.db
 Desktop.ini
 
-# ============================================
-# 前端构建产物（如果在根目录运行）
-# ============================================
-node_modules/
-.next/
-dist/
+# Local examples / scratch space
+examples/
+test/
+.tmp-law-ref/

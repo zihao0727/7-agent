@@ -27,7 +27,7 @@ from openai import AsyncOpenAI
 
 from backend.config import get_settings
 from backend.intent_router import IntentRoute, format_route_for_prompt
-from backend.model_routing import is_kimi_route
+from backend.model_routing import get_model_route
 from backend.state import AppState
 
 logger = logging.getLogger(__name__)
@@ -107,20 +107,17 @@ def _extract_reasoning_delta(delta: Any) -> str:
 # ── 客户端工厂 ────────────────────────────────────────────────────
 
 def _make_client(model: str = "deepseek-v4-flash") -> AsyncOpenAI:
-    s = get_settings()
-
-    if is_kimi_route(model):
-        logger.info(f"使用 Kimi 模型: base_url={s.kimi_base_url}, model={s.kimi_model}")
-        return AsyncOpenAI(
-            api_key=s.kimi_api_key,
-            base_url=s.kimi_base_url,
-        )
-    else:
-        logger.info(f"使用 DeepSeek 模型: base_url={s.deepseek_base_url}, model={s.deepseek_model}")
-        return AsyncOpenAI(
-            api_key=s.deepseek_api_key,
-            base_url=s.deepseek_base_url,
-        )
+    route = get_model_route(model)
+    logger.info(
+        "使用 %s 模型: base_url=%s, model=%s",
+        route.provider,
+        route.base_url,
+        route.model,
+    )
+    return AsyncOpenAI(
+        api_key=route.api_key,
+        base_url=route.base_url,
+    )
 
 
 # ── 单步 Agent 执行 ───────────────────────────────────────────────────────────
@@ -162,6 +159,29 @@ USER_INJECTED_TOOL_NAMES = frozenset({
 AUTO_STOP_TOOLS = frozenset({"text_to_image"})
 
 
+def _result_is_permission_request(result: Any) -> bool:
+    """工具返回值是否是一份待审批的权限请求。
+
+    工具自己发起的权限请求（bash 删除 / bash 外部写入 / read_file 外部读取等）
+    返回的是 `create_permission_request` 序列化后的 JSON 字符串：
+        {"type":"permission_required","id":"...","status":"pending",...}
+    本轮一旦检测到任何一个就必须 stop，否则 LLM 会把 permission_required 当
+    成普通工具结果继续调下一个工具，绕开用户在 UI 的批准动作。
+    """
+    if isinstance(result, dict):
+        return result.get("type") == "permission_required"
+    if not isinstance(result, str):
+        return False
+    text = result.lstrip()
+    if not text.startswith("{") or '"permission_required"' not in text:
+        return False
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("type") == "permission_required"
+
+
 async def run_agent_streaming(
     messages: list[dict],
     state: AppState,
@@ -182,6 +202,7 @@ async def run_agent_streaming(
     """
     settings = get_settings()
     logger.info("开始单步 Agent，模型: %s，消息数: %d", model, len(messages))
+    route = get_model_route(model)
     client = _make_client(model)
     prompt = system_prompt or settings.system_prompt
     if intent_route:
@@ -211,18 +232,19 @@ async def run_agent_streaming(
 
     # ── 调用 LLM（流式）──────────────────────────────────────────────
     try:
-        model_name = (
-            settings.kimi_model if is_kimi_route(model) else settings.deepseek_model
-        )
-        stream = await client.chat.completions.create(
-            model=model_name,
-            messages=full_messages,
-            tools=tools_schema if tools_schema else None,
-            tool_choice="auto" if tools_schema else None,
-            max_tokens=settings.max_tokens,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        llm_kwargs: dict[str, Any] = {
+            "model": route.model,
+            "messages": full_messages,
+            "tools": tools_schema if tools_schema else None,
+            "tool_choice": "auto" if tools_schema else None,
+            "max_tokens": settings.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if route.provider == "SevnX":
+            llm_kwargs["extra_body"] = {"instructions": prompt}
+
+        stream = await client.chat.completions.create(**llm_kwargs)
     except Exception as exc:
         yield _error(f"LLM 调用失败: {exc}")
         yield _done("error")
@@ -319,6 +341,7 @@ async def run_agent_streaming(
         yield _tool_call(tc)
 
     # 串行执行工具：每完成一个立即推送结果，前端逐个更新为"已完成"
+    has_pending_permission = False
     for ai_tc in ai_sdk_calls:
         tool_name = ai_tc["toolName"]
         # 剥离 _purpose 字段：该字段仅用于前端展示，不传入工具执行
@@ -346,10 +369,14 @@ async def run_agent_streaming(
                 payload={"kind": "tool_call", "tool_name": tool_name, "args": exec_args},
             )
             yield _tool_result({"toolCallId": ai_tc["toolCallId"], "result": permission})
+            has_pending_permission = True
             continue
         try:
             result = await state.tool_registry.execute(tool_name, exec_args)
             logger.info("工具 '%s' 执行完成", tool_name)
+            if _result_is_permission_request(result):
+                # 工具内部主动发起的权限请求（bash 删除/外部写入、read_file 外部读取等）
+                has_pending_permission = True
             yield _tool_result({"toolCallId": ai_tc["toolCallId"], "result": result})
         except Exception as exc:
             logger.warning("工具 '%s' 执行失败: %s", tool_name, exc)
@@ -365,5 +392,57 @@ async def run_agent_streaming(
         yield _done("stop", usage)
         return
 
+    # 本轮存在尚未批准的权限请求 → 必须 stop，等用户在 UI 点同意/拒绝
+    # 后再由前端 addToolResult → useChat 自动续步。否则 LLM 会把 permission_required
+    # 当成普通工具结果，立刻去调别的工具，绕开权限确认流程。
+    if has_pending_permission:
+        yield _done("stop", usage)
+        return
+
     # 默认以 "tool-calls" 结束本轮，前端 useChat（maxSteps>1）将自动发起下一步请求
     yield _done("tool-calls", usage)
+
+
+# ── P0: 自动技能提取集成 ──────────────────────────────────────────────────
+
+
+async def trigger_skill_extraction_if_needed(
+    session_id: str,
+    user_id: int,
+    messages: list[dict],
+) -> None:
+    """
+    在会话结束时检查是否需要触发技能提取
+
+    这是 Hermes 风格的学习闭环核心：
+    - 检测复杂任务（5+ 工具调用）
+    - 自动生成技能文档
+    - 等待用户确认后激活
+    """
+    from backend.skill_extractor import analyze_task_complexity, extract_skill_from_session
+
+    try:
+        # 1. 分析任务复杂度
+        complexity = analyze_task_complexity(messages)
+
+        if not complexity["is_complex"]:
+            logger.debug(f"会话 {session_id} 不够复杂，跳过技能提取")
+            return
+
+        # 2. 触发技能提取（后台异步）
+        logger.info(
+            f"检测到复杂任务（{complexity['tool_call_count']} 次工具调用），"
+            f"触发技能提取: {session_id}"
+        )
+
+        asyncio.create_task(
+            extract_skill_from_session(
+                user_id=user_id,
+                session_id=session_id,
+                messages=messages,
+                model="deepseek-v4-flash",
+            )
+        )
+
+    except Exception as exc:
+        logger.warning(f"技能提取触发失败: {exc}")

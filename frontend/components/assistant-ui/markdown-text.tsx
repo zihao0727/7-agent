@@ -16,16 +16,12 @@ import { useState, useEffect, memo, useMemo } from "react";
 import { Check, Copy } from "lucide-react";
 import { authorizedFetch } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
-
-const API_URL =
-  typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:6868")
-    : "";
+import { getApiBaseUrl } from "@/lib/runtime-config";
 
 function resolveImageSrc(src?: string): string | undefined {
   if (!src) return src;
   if (/^https?:\/\//i.test(src) || src.startsWith("data:")) return src;
-  if (src.startsWith("/api/")) return `${API_URL}${src}`;
+  if (src.startsWith("/api/")) return `${getApiBaseUrl()}${src}`;
   return src;
 }
 

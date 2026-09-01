@@ -1,0 +1,5 @@
+{
+  "appUrl": "https://app.example.com",
+  "apiUrl": "https://api.example.com",
+  "autoUpdateLarkCli": true
+}

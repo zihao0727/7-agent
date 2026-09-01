@@ -8,6 +8,56 @@ from pathlib import Path
 _SAFE_SEGMENT = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
+def _additional_readable_roots() -> tuple[Path, ...]:
+    """项目内、允许走"用户批准后读取"流程的目录白名单。
+
+    这些目录里的文件 *不会* 被 read_file 直接读取（仍然返回 workspace 错误），
+    而是触发 backend.permission_service 的批准弹窗；用户在前端点同意后，
+    permission_service 会调用 file_ops.read_external_file_approved 重新校验并读取。
+    """
+    return (
+        data_root() / "reports",
+    )
+
+
+def is_within_additional_readable_root(path: Path) -> Path | None:
+    """若 path（已解析）位于额外可读根之下，返回命中的根；否则返回 None。"""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    for root in _additional_readable_roots():
+        try:
+            root_resolved = root.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(root_resolved)
+            return root_resolved
+        except ValueError:
+            continue
+    return None
+
+
+def resolve_external_readable_path(value: str) -> Path | None:
+    """把字符串路径解析为外部可读路径；不在白名单则返回 None。
+
+    只接受绝对路径——外部读取必须显式给绝对地址，相对路径一律走工作区流程。
+    """
+    if not value:
+        return None
+    raw = Path(os.path.expanduser(value))
+    if not raw.is_absolute():
+        return None
+    try:
+        resolved = raw.resolve()
+    except OSError:
+        return None
+    if is_within_additional_readable_root(resolved) is None:
+        return None
+    return resolved
+
+
 def safe_segment(value: str | int | None, fallback: str = "default") -> str:
     text = str(value if value is not None else fallback)
     safe = _SAFE_SEGMENT.sub("_", text).strip("._-")

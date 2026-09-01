@@ -25,13 +25,14 @@ import {
   buildPersistableParts,
   normalizeMessagesFromSessionApi,
 } from "@/lib/chat-message-normalize";
+import { getApiBaseUrl } from "@/lib/runtime-config";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:6868";
 const MIN_SESSION_LOAD_MS = 880;
 const TITLE_SUMMARY_DEBOUNCE_MS = 1500;
 const DEEPSEEK_MODEL_ID =
   process.env.NEXT_PUBLIC_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
 const KIMI_MODEL_ID = process.env.NEXT_PUBLIC_KIMI_MODEL ?? "kimi-k2.6";
+const SEVNX_MODEL_ID = process.env.NEXT_PUBLIC_SEVNX_MODEL ?? "gpt-5.5";
 
 const MODELS = [
   {
@@ -44,6 +45,11 @@ const MODELS = [
     name: "Kimi",
     label: `Kimi (${KIMI_MODEL_ID})`,
   },
+  {
+    id: SEVNX_MODEL_ID,
+    name: "SevnX",
+    label: `SevnX (${SEVNX_MODEL_ID})`,
+  },
 ];
 
 interface ChatAreaProps {
@@ -53,12 +59,13 @@ interface ChatAreaProps {
 
 export function ChatArea({ sessionId, onSessionIdChange }: ChatAreaProps) {
   const { accessToken } = useAuth();
+  const apiUrl = getApiBaseUrl();
   const [selectedModel, setSelectedModel] = useState(DEEPSEEK_MODEL_ID);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [sessionSwitchLoading, setSessionSwitchLoading] = useState(false);
 
   const chat = useChat({
-    api: `${API_URL}/api/chat`,
+    api: `${apiUrl}/api/chat`,
     body: { sessionId },
     maxSteps: 20,
     onError: (err) => console.error("[chat]", err),

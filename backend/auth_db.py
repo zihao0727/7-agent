@@ -25,7 +25,7 @@ def _mysql_config(include_db: bool = True) -> dict[str, Any]:
         "host": _config_value("MYSQL_HOST", "localhost"),
         "port": int(_config_value("MYSQL_PORT", "3306")),
         "user": _config_value("MYSQL_USER", "root"),
-        "password": _config_value("MYSQL_PASSWORD", "REDACTED_MYSQL_PASSWORD"),
+        "password": _config_value("MYSQL_PASSWORD", ""),
         "charset": "utf8mb4",
         "autocommit": False,
         "cursorclass": pymysql.cursors.Cursor,
@@ -85,21 +85,29 @@ async def connect_auth_db() -> None:
     if _initialized:
         return
 
-    db_name = _config_value("MYSQL_DATABASE", "sevnx_agent")
-    bootstrap_config = _mysql_config(include_db=False)
-    bootstrap = await asyncio.to_thread(pymysql.connect, **bootstrap_config)
     try:
-        def _bootstrap_create() -> None:
-            with bootstrap.cursor() as cursor:
-                cursor.execute(
-                    f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
-                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-                )
-            bootstrap.commit()
+        connection = await asyncio.to_thread(pymysql.connect, **_mysql_config())
+        await asyncio.to_thread(connection.close)
+    except pymysql.err.OperationalError as exc:
+        if not exc.args or int(exc.args[0]) != 1049:
+            raise
+        db_name = _config_value("MYSQL_DATABASE", "sevnx_agent")
+        bootstrap = await asyncio.to_thread(
+            pymysql.connect,
+            **_mysql_config(include_db=False),
+        )
+        try:
+            def _bootstrap_create() -> None:
+                with bootstrap.cursor() as cursor:
+                    cursor.execute(
+                        f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    )
+                bootstrap.commit()
 
-        await asyncio.to_thread(_bootstrap_create)
-    finally:
-        await asyncio.to_thread(bootstrap.close)
+            await asyncio.to_thread(_bootstrap_create)
+        finally:
+            await asyncio.to_thread(bootstrap.close)
 
     await initialize_auth_tables()
     _initialized = True

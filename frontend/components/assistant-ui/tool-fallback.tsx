@@ -18,6 +18,9 @@ import {
   Code2Icon,
   ShieldAlertIcon,
   Trash2Icon,
+  FileTextIcon,
+  PencilLineIcon,
+  WrenchIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { authorizedFetch } from "@/lib/auth";
@@ -34,11 +37,6 @@ const TEXT_TO_IMAGE_TOOL = "text_to_image";
 
 /** 浏览器工具名前缀 */
 const BROWSER_TOOL_PREFIX = "browser_";
-const API_URL =
-  typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:6868")
-    : "";
-
 /** 从工具结果中提取浏览器截图数据（含 screenshot_url 字段的 JSON） */
 function extractBrowserResult(result: unknown): {
   screenshotUrl: string;
@@ -229,18 +227,83 @@ function getLocalizedPurposeLine(toolName: string, fallback: string): string {
   return (lang === "zh" ? zh[toolName] : en[toolName]) || fallback;
 }
 
-function formatPermissionResult(result: unknown): string {
+type PermissionActionMeta = {
+  badge: string;
+  approveLabel: string;
+  approvingLabel: string;
+  defaultSummary: string;
+  deniedText: string;
+  executedText: string;
+  accentClassName: string;
+  icon: "delete" | "read" | "write" | "tool";
+};
+
+const permissionActionMeta: Record<string, PermissionActionMeta> = {
+  delete_files: {
+    badge: "删除操作",
+    approveLabel: "允许删除",
+    approvingLabel: "删除中...",
+    defaultSummary: "该命令会删除文件或目录，请确认后再执行。",
+    deniedText: "已拒绝删除。",
+    executedText: "删除操作已执行。",
+    accentClassName: "border-red-200 bg-red-50 text-red-600 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-300",
+    icon: "delete",
+  },
+  read_external_file: {
+    badge: "读取文件",
+    approveLabel: "允许读取",
+    approvingLabel: "读取中...",
+    defaultSummary: "该操作需要读取工作区外的受限目录文件，请确认后再继续。",
+    deniedText: "已拒绝读取。",
+    executedText: "文件读取已执行。",
+    accentClassName: "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-300",
+    icon: "read",
+  },
+  external_shell_write: {
+    badge: "写入操作",
+    approveLabel: "允许写入",
+    approvingLabel: "写入中...",
+    defaultSummary: "该命令会写入工作区外的受限目录，请确认后再执行。",
+    deniedText: "已拒绝写入。",
+    executedText: "写入操作已执行。",
+    accentClassName: "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-300",
+    icon: "write",
+  },
+  tool_call: {
+    badge: "工具调用",
+    approveLabel: "允许执行",
+    approvingLabel: "执行中...",
+    defaultSummary: "该工具调用需要授权，请确认后再执行。",
+    deniedText: "已拒绝执行。",
+    executedText: "操作已执行。",
+    accentClassName: "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-300",
+    icon: "tool",
+  },
+};
+
+function getPermissionActionMeta(action?: string): PermissionActionMeta {
+  return permissionActionMeta[action || ""] || permissionActionMeta.tool_call;
+}
+
+function PermissionActionIcon({ icon }: { icon: PermissionActionMeta["icon"] }) {
+  if (icon === "delete") return <Trash2Icon className="h-3.5 w-3.5" />;
+  if (icon === "read") return <FileTextIcon className="h-3.5 w-3.5" />;
+  if (icon === "write") return <PencilLineIcon className="h-3.5 w-3.5" />;
+  return <WrenchIcon className="h-3.5 w-3.5" />;
+}
+
+function formatPermissionResult(result: unknown, meta: PermissionActionMeta): string {
   if (!result || typeof result !== "object") return "";
   const obj = result as Record<string, unknown>;
   if (typeof obj.error === "string") return obj.error;
   if (typeof obj.result === "string") {
     const text = obj.result.trim();
     if (!text) return "";
-    if (text.includes("<exit_code>0</exit_code>")) return "删除操作已执行。";
+    if (text.includes("<exit_code>0</exit_code>")) return meta.executedText;
     return text;
   }
-  if (obj.status === "denied") return "已拒绝删除。";
-  if (obj.status === "executed") return "删除操作已执行。";
+  if (obj.status === "denied") return meta.deniedText;
+  if (obj.status === "executed") return meta.executedText;
   return "";
 }
 
@@ -311,6 +374,10 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status, addResult 
   const [permissionError, setPermissionError] = useState("");
   const staticPurposeLine = useToolPurposeLine(toolName);
   const permissionRequest = useMemo(() => extractPermissionRequest(result), [result]);
+  const permissionMeta = useMemo(
+    () => getPermissionActionMeta(permissionRequest?.action),
+    [permissionRequest?.action],
+  );
   // 优先使用 LLM 生成的 _purpose（结合用户实际问题的上下文），降级到工具静态描述
   const purposeLine = permissionRequest?.summary
     || ((args as Record<string, unknown> | null | undefined)?._purpose as string | undefined)
@@ -336,7 +403,7 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status, addResult 
   const displayError = status?.error ? (typeof status.error === "string" ? status.error : JSON.stringify(status.error)) : undefined;
   const hasDetails = !permissionRequest && !pdfFromTool && (!!displayArgs || result !== undefined);
 
-  const resolvedPermissionText = formatPermissionResult(permissionResult) || formatPermissionResult(result);
+  const resolvedPermissionText = formatPermissionResult(permissionResult, permissionMeta) || formatPermissionResult(result, permissionMeta);
   const canResolvePermission = !permissionResult && permissionRequest?.status === "pending";
 
   const handlePermissionResolve = async (approved: boolean) => {
@@ -405,12 +472,15 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status, addResult 
                 <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                   需要授权
                 </p>
-                <span className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-600 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-300">
-                  删除操作
+                <span className={cn(
+                  "rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                  permissionMeta.accentClassName,
+                )}>
+                  {permissionMeta.badge}
                 </span>
               </div>
               <p className="mt-1 text-[13px] leading-relaxed text-zinc-600 dark:text-zinc-300">
-                {permissionRequest.summary || "该命令会删除文件或目录，请确认后再执行。"}
+                {permissionRequest.summary || permissionMeta.defaultSummary}
               </p>
               {permissionRequest.target && (
                 <div className="mt-2 rounded-md border border-zinc-200 bg-white px-2.5 py-2 font-mono text-[12px] text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-300">
@@ -433,10 +503,15 @@ function ToolFallbackImpl({ toolName, argsText, args, result, status, addResult 
                     type="button"
                     onClick={() => handlePermissionResolve(true)}
                     disabled={permissionBusy !== null}
-                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-red-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-red-500 dark:hover:bg-red-400"
+                    className={cn(
+                      "inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-semibold text-white shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60",
+                      permissionMeta.icon === "delete"
+                        ? "bg-red-600 hover:bg-red-700 dark:bg-red-500 dark:hover:bg-red-400"
+                        : "bg-zinc-900 hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white",
+                    )}
                   >
-                    <Trash2Icon className="h-3.5 w-3.5" />
-                    {permissionBusy === "approve" ? "执行中..." : "允许删除"}
+                    <PermissionActionIcon icon={permissionMeta.icon} />
+                    {permissionBusy === "approve" ? permissionMeta.approvingLabel : permissionMeta.approveLabel}
                   </button>
                 </div>
               )}

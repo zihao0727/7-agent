@@ -47,7 +47,7 @@ export function extractPdfFromAssistantText(
   const idx = text.indexOf('"presigned_url"');
   if (idx === -1) return null;
 
-  let start = text.lastIndexOf("{", idx);
+  const start = text.lastIndexOf("{", idx);
   if (start === -1) return null;
 
   let depth = 0;

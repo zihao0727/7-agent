@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.auth_db import connect_auth_db, disconnect_auth_db
 from backend.config import get_settings
 from backend.db import connect_db, disconnect_db
-from backend.routers import auth, browser, chat, code_runner, knowledge, lark, memories, permissions, scheduled_tasks, tools, skills, mcp, sessions
+from backend.routers import auth, browser, chat, client_runtime, code_runner, knowledge, lark, memories, permissions, scheduled_tasks, tools, skills, mcp, sessions, agent_loop, auto_skills
 from backend.scheduled_tasks import scheduled_task_service
 from backend.state import get_app_state
 
@@ -69,6 +69,9 @@ app.include_router(code_runner.router, prefix="/api")
 app.include_router(lark.router, prefix="/api")
 app.include_router(scheduled_tasks.router, prefix="/api")
 app.include_router(permissions.router, prefix="/api")
+app.include_router(client_runtime.router, prefix="/api")
+app.include_router(agent_loop.router)  # P1: 服务端完整 Agent 循环
+app.include_router(auto_skills.router)  # P0: 自动技能管理
 
 generated_dir = Path(__file__).resolve().parent.parent / "data" / "generated"
 generated_dir.mkdir(parents=True, exist_ok=True)
